@@ -9,7 +9,14 @@ import pytest
 from findex import store
 from findex.corpus import Document
 from findex.index import LAYOUTS, DocMeta, Posting, build_index, guess_title
-from findex.search import MERGE, SET, difference, evaluate, intersect, parse, union
+from findex.merge import MERGE, SET, difference, intersect, union
+from findex.query import And, Term, parse
+
+
+def evaluate(index, query, engine=MERGE):
+    node = parse(query)
+    return [] if node is None else list(node.evaluate(index, engine))
+
 
 TEXTS = [
     "Hello world. The cat sat.",  # 0
@@ -53,7 +60,7 @@ def test_postings_sorted_and_counted(index):
 
 def test_build_consumes_a_stream():
     idx = build_index(iter(list(docs())))  # a one-shot iterator is enough
-    assert idx.n_docs == 4
+    assert idx.num_docs == 4
 
 
 def test_positions_flag():
@@ -89,15 +96,20 @@ def test_queries(index, engine):
     assert evaluate(index, "cat OR привіт", engine) == [0, 1, 2]
     assert evaluate(index, "the NOT cat", engine) == [3]
     assert evaluate(index, "NOT the", engine) == [2]
-    assert evaluate(index, "world OR dog NOT cat", engine) == [2, 3]  # left to right
+    # Lab 3 precedence: world OR (dog AND NOT cat)
+    assert evaluate(index, "world OR dog NOT cat", engine) == [0, 2, 3]
+    assert evaluate(index, "(world OR dog) NOT cat", engine) == [2, 3]
+    assert evaluate(index, "world OR (dog cat)", engine) == [0, 1, 2]
     assert evaluate(index, "HELLO", engine) == [0]  # normalized like the corpus
     assert evaluate(index, "zebra", engine) == []
     assert evaluate(index, "", engine) == []
 
 
 def test_parse_lowercase_operators_are_words():
-    assert [c.terms for c in parse("cats and dogs")] == [("cats",), ("and",), ("dogs",)]
-    assert parse("state-of-the-art")[0].terms == ("state", "of", "the", "art")
+    assert parse("cats and dogs") == Term("cats") & Term("and") & Term("dogs")
+    assert parse("state-of-the-art") == And(
+        And(And(Term("state"), Term("of")), Term("the")), Term("art")
+    )
 
 
 # --- persistence -----------------------------------------------------------
@@ -107,7 +119,7 @@ def test_roundtrip(tmp_path, index, suffix):
     store.save(index, path)
     for lazy in (False, True) if suffix == ".bin" else (False,):
         back = store.load(path, lazy=lazy)
-        assert back.n_docs == index.n_docs
+        assert back.num_docs == index.num_docs
         assert back.doc_lengths == index.doc_lengths
         assert back.doc_meta == index.doc_meta
         assert set(back.postings) == set(index.postings)

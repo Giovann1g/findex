@@ -20,19 +20,25 @@ is sorted by doc_id by construction — no sort step needed.
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import time
 import tracemalloc
 from array import array
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from functools import cached_property, lru_cache
 from itertools import islice
 from pathlib import Path
 from typing import Literal
 
 from findex.corpus import Document, iter_documents
+from findex.merge import MERGE, Engine
+from findex.timing import timed
 from findex.tokenize import tokenize
+
+log = logging.getLogger(__name__)
 
 Layout = Literal["plain", "slots", "array"]
 LAYOUTS: tuple[Layout, ...] = ("plain", "slots", "array")
@@ -65,19 +71,133 @@ class DocMeta:
     title: str
 
 
-@dataclass
-class Index:
-    postings: Mapping[str, object]  # list[Posting] | list[PlainPosting] | (array, array)
-    doc_lengths: dict[int, int]
-    doc_meta: dict[int, DocMeta]
-    layout: Layout = "slots"
-    has_positions: bool = False
-    meta: dict[str, object] = field(default_factory=dict)
+class Index(Mapping[str, Sequence[Posting]]):
+    """The inverted index as a read-only mapping ``term -> postings``.
 
+    Inheriting from ``collections.abc.Mapping`` and defining the three abstract
+    methods (``__getitem__``, ``__iter__``, ``__len__``) gives ``keys()``,
+    ``items()``, ``values()``, ``get()`` and ``==`` for free. ``__contains__``
+    is overridden only for speed (one dict lookup instead of ``try/except``).
+
+    ``len(index)`` is the number of *terms*; ``index.num_docs`` the number of
+    documents. An index with no terms is falsy (no ``__bool__`` -> ``__len__``).
+    """
+
+    def __init__(
+        self,
+        postings: Mapping[str, object],  # list[Posting] | list[PlainPosting] | (array, array)
+        doc_lengths: dict[int, int],
+        doc_meta: dict[int, DocMeta],
+        layout: Layout = "slots",
+        has_positions: bool = False,
+        meta: dict[str, object] | None = None,
+    ) -> None:
+        self.postings = postings
+        self.doc_lengths = doc_lengths
+        self.doc_meta = doc_meta
+        self.layout = layout
+        self.has_positions = has_positions
+        self.meta: dict[str, object] = dict(meta or {})
+        self.closed = False
+
+    # --- the Mapping protocol ------------------------------------------------
+    def __getitem__(self, term: str) -> Sequence[Posting]:
+        plist = self.postings[term]  # KeyError for an unknown term, like a dict
+        if self.layout == "array":  # rebuild records on demand
+            ids, tfs = plist  # type: ignore[misc]
+            return [Posting(d, t) for d, t in zip(ids, tfs, strict=True)]
+        return plist  # type: ignore[return-value]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.postings)
+
+    def __len__(self) -> int:
+        return len(self.postings)
+
+    def __contains__(self, term: object) -> bool:
+        return term in self.postings
+
+    def __repr__(self) -> str:
+        extra = ", positions" if self.has_positions else ""
+        state = ", closed" if self.closed else ""
+        return (
+            f"Index(terms={len(self):,}, docs={self.num_docs:,}, "
+            f"layout={self.layout!r}{extra}{state})"
+        )
+
+    # --- document statistics -------------------------------------------------
     @property
-    def n_docs(self) -> int:
+    def num_docs(self) -> int:
         return len(self.doc_meta)
 
+    @cached_property
+    def avg_doc_length(self) -> float:
+        """Computed once on first access, then stored in the instance ``__dict__``
+        (a non-data descriptor: the instance attribute shadows it afterwards)."""
+        n = self.num_docs
+        return sum(self.doc_lengths.values()) / n if n else 0.0
+
+    def doc_length(self, doc_id: int) -> int:
+        return self.doc_lengths[doc_id]
+
+    def title(self, doc_id: int) -> str:
+        return self.doc_meta[doc_id].title
+
+    # --- query support -------------------------------------------------------
+    def match(self, node, engine: Engine = MERGE) -> tuple[int, ...]:
+        """Doc ids matching a parsed query (``findex.query`` node), cached.
+
+        The cache is an ``lru_cache`` *per index instance* (see ``_match_cache``),
+        keyed by the query tree — equal trees share an entry, so ``a b`` and
+        ``a AND b`` hit the same slot. The result is a tuple: a cached list could
+        be mutated by one caller and poison every later hit.
+        """
+        cache = self._match_cache
+        hits_before = cache.cache_info().hits
+        ids = cache(node, engine)
+        outcome = "hit" if cache.cache_info().hits > hits_before else "miss"
+        log.info("match cache %s: %s -> %d docs", outcome, node, len(ids))
+        return ids
+
+    @cached_property
+    def _match_cache(self):
+        # Not ``@lru_cache`` on the method itself: that cache would live on the
+        # class, key on ``self`` (Index is unhashable — Mapping defines __eq__)
+        # and keep every index ever searched alive.
+        @lru_cache(maxsize=256)
+        def match_ids(node, engine: Engine) -> tuple[int, ...]:
+            return tuple(node.evaluate(self, engine))
+
+        return match_ids
+
+    def search(self, query, **kwargs):
+        """Ranked search; see :func:`findex.rank.search` for the arguments."""
+        from findex.rank import search  # rank imports this module
+
+        return search(self, query, **kwargs)
+
+    # --- resources -----------------------------------------------------------
+    def close(self) -> None:
+        """Release what the index holds open (the mmap of a lazy ``.bin``) and
+        drop caches. Idempotent; ``open_index`` calls it on exit."""
+        if self.closed:
+            return
+        closer = getattr(self.postings, "close", None)
+        if closer is not None:
+            closer()
+        cache = self.__dict__.pop("_match_cache", None)
+        if cache is not None:
+            cache.cache_clear()
+        self.closed = True
+
+    def __getstate__(self) -> dict:
+        # Caches are derived data and an lru_cache wrapper can't be pickled.
+        state = dict(self.__dict__)
+        state.pop("_match_cache", None)
+        state.pop("avg_doc_length", None)
+        return state
+
+    # --- raw access used by the Boolean engines and the Lab 2 benchmarks ------
     def doc_ids(self, term: str) -> Sequence[int]:
         """Doc-id-sorted ids of documents containing ``term`` (empty if none)."""
         plist = self.postings.get(term)
@@ -130,6 +250,7 @@ def guess_title(text: str, fallback: str) -> str:
 _ROLE_RE = re.compile(r":[\w:.-]+:`[!~]?([^`<]+?)(?:\s*<[^>]*>)?`")
 
 
+@timed
 def build_index(
     docs: Iterable[Document], layout: Layout = "slots", positions: bool = False
 ) -> Index:
@@ -177,6 +298,14 @@ def build_index(
     return Index(postings, doc_lengths, doc_meta, layout, positions)
 
 
+def setup_logging(quiet: bool = False) -> None:
+    """CLI logging: ``@timed`` and cache lines go to stderr, results to stdout."""
+    logging.basicConfig(
+        level=logging.WARNING if quiet else logging.INFO,
+        format="[%(name)s] %(message)s",
+    )
+
+
 def fmt_bytes(n: float) -> str:
     for unit in ("B", "KiB", "MiB", "GiB"):
         if n < 1024 or unit == "GiB":
@@ -195,11 +324,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--positions", action="store_true", help="store token positions")
     p.add_argument("--format", choices=store.FORMATS, default=None, help="default: by suffix")
     p.add_argument("--limit", type=int, default=None, help="first N documents only")
+    p.add_argument("-q", "--quiet", action="store_true", help="no @timed log lines")
     args = p.parse_args(argv)
+    setup_logging(args.quiet)
 
     tracemalloc.start()
     t0 = time.perf_counter()
     index = build_index(islice(iter_documents(args.root), args.limit), args.layout, args.positions)
+    index.meta["root"] = str(args.root)  # lets search find the texts again for snippets
     t_build = time.perf_counter() - t0
     _, peak_build = tracemalloc.get_traced_memory()
 
@@ -209,9 +341,10 @@ def main(argv: list[str] | None = None) -> None:
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    n_postings = sum(index.df(t) for t in index.postings)
-    print(f"documents:     {index.n_docs:,}")
-    print(f"terms:         {len(index.postings):,}")
+    n_postings = sum(index.df(t) for t in index)
+    print(repr(index))
+    print(f"documents:     {index.num_docs:,}")
+    print(f"terms:         {len(index):,}")
     print(f"postings:      {n_postings:,}")
     print(f"layout:        {index.layout}{' + positions' if index.has_positions else ''}")
     print(f"build:         {t_build:.2f} s   (peak {fmt_bytes(peak_build)})")
@@ -220,4 +353,10 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # `python -m findex.index` runs this file as the module `__main__`, so the
+    # classes defined here would be `__main__.Index`, `__main__.Posting` — and a
+    # pickle written now couldn't be loaded by any other program. Run the
+    # importable module's main() instead, so pickles say `findex.index.Index`.
+    from findex import index as _importable
+
+    _importable.main()

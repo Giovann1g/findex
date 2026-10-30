@@ -1,0 +1,103 @@
+{
+  "criterion": "A document is relevant if it is *devoted to* the topic of the query (the page a Python developer would want to open), not if it merely mentions the words. 'What's New' pages, indexes and glossary entries are not relevant. Labels were assigned from document titles and contents before any ranking was run.",
+  "queries": [
+    {
+      "query": "asyncio event loop",
+      "relevant": [
+        "python-docs/library/asyncio-eventloop.rst",
+        "python-docs/howto/a-conceptual-overview-of-asyncio.rst",
+        "python-docs/library/asyncio-runner.rst",
+        "python-docs/library/asyncio-llapi-index.rst",
+        "python-docs/library/asyncio-dev.rst",
+        "python-docs/library/asyncio-platforms.rst",
+        "python-docs/library/asyncio.rst"
+      ],
+      "why": "the event-loop reference, the conceptual overview, runners (which own the loop), the low-level API index, developing-with-asyncio, platform support of loops, the package overview"
+    },
+    {
+      "query": "\"context manager\"",
+      "relevant": [
+        "python-docs/library/contextlib.rst",
+        "python-docs/reference/compound_stmts.rst",
+        "python-docs/reference/datamodel.rst",
+        "python-docs/builtins/stdtypes.rst"
+      ],
+      "why": "contextlib; the with statement; __enter__/__exit__ in the data model; 'Context Manager Types'"
+    },
+    {
+      "query": "generator yield",
+      "relevant": [
+        "python-docs/reference/expressions.rst",
+        "python-docs/reference/simple_stmts.rst",
+        "python-docs/howto/functional.rst",
+        "python-docs/tutorial/classes.rst"
+      ],
+      "why": "yield expressions; the yield statement; the Generators section of the functional HOWTO; the tutorial's Generators section"
+    },
+    {
+      "query": "unicode normalization",
+      "relevant": [
+        "python-docs/howto/unicode.rst",
+        "python-docs/library/unicodedata.rst",
+        "python-docs/reference/lexical_analysis.rst"
+      ],
+      "why": "the Unicode HOWTO; unicodedata.normalize; NFKC normalization of identifiers"
+    },
+    {
+      "query": "lru_cache",
+      "relevant": [
+        "python-docs/library/functools.rst",
+        "python-docs/faq/programming.rst"
+      ],
+      "why": "the reference; the FAQ 'How do I cache method calls?'"
+    },
+    {
+      "query": "pickle untrusted data",
+      "relevant": [
+        "python-docs/library/pickle.rst",
+        "python-docs/library/shelve.rst",
+        "python-docs/library/marshal.rst",
+        "python-docs/library/security_warnings.rst"
+      ],
+      "why": "pickle and its security warning; shelve and marshal, which carry the same warning; the security-considerations page"
+    },
+    {
+      "query": "\"global interpreter lock\"",
+      "relevant": [
+        "python-docs/faq/library.rst",
+        "python-docs/howto/free-threading-python.rst",
+        "python-docs/library/threading.rst",
+        "python-docs/c-api/init.rst",
+        "python-docs/builtins/threadsafety.rst"
+      ],
+      "why": "FAQ 'Can't we get rid of the GIL?'; free threading; threading and the GIL; 'Thread State and the GIL' in the C API; thread safety of built-ins"
+    },
+    {
+      "query": "regular expression named groups",
+      "relevant": [
+        "python-docs/library/re.rst",
+        "python-docs/howto/regex.rst"
+      ],
+      "why": "the re reference and the regex HOWTO"
+    },
+    {
+      "query": "sort key function",
+      "relevant": [
+        "python-docs/howto/sorting.rst",
+        "python-docs/builtins/functions.rst",
+        "python-docs/builtins/stdtypes.rst",
+        "python-docs/tutorial/datastructures.rst"
+      ],
+      "why": "the Sorting HOWTO; sorted(); list.sort(); the tutorial's list methods"
+    },
+    {
+      "query": "virtual environment",
+      "relevant": [
+        "python-docs/library/venv.rst",
+        "python-docs/tutorial/venv.rst",
+        "python-docs/installing/index.rst"
+      ],
+      "why": "the venv reference; the tutorial chapter; Installing Python Modules"
+    }
+  ]
+}

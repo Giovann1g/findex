@@ -14,7 +14,7 @@ import timeit
 from pathlib import Path
 
 from findex import store
-from findex.search import ENGINES, intersect_gallop
+from findex.merge import ENGINES, intersect_gallop
 
 
 def pick_terms(index) -> tuple[list[str], list[str]]:

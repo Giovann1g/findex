@@ -31,9 +31,11 @@ import struct
 import sys
 from array import array
 from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 
 from findex.index import DocMeta, Index, Posting
+from findex.timing import timed
 
 FORMATS = ("pickle", "json", "bin")
 _SUFFIX = {".pkl": "pickle", ".pickle": "pickle", ".json": "json", ".bin": "bin"}
@@ -51,7 +53,7 @@ def detect_format(path: Path, fmt: str | None = None) -> str:
 
 
 def _meta_rows(index: Index) -> tuple[list[int], list[list[str]]]:
-    n = index.n_docs
+    n = index.num_docs
     lengths = [index.doc_lengths[i] for i in range(n)]
     metas = [[index.doc_meta[i].path, index.doc_meta[i].title] for i in range(n)]
     return lengths, metas
@@ -80,6 +82,7 @@ def save(index: Index, path: Path, fmt: str | None = None) -> str:
     return fmt
 
 
+@timed
 def load(path: Path, fmt: str | None = None, *, lazy: bool = False) -> Index:
     path = Path(path)
     fmt = detect_format(path, fmt)
@@ -91,6 +94,27 @@ def load(path: Path, fmt: str | None = None, *, lazy: bool = False) -> Index:
     if fmt == "bin":
         return _load_bin(path, lazy=lazy)
     raise ValueError(fmt)
+
+
+@contextmanager
+def open_index(path: Path, fmt: str | None = None, *, lazy: bool = False) -> Iterator[Index]:
+    """``with open_index("index.pkl") as ix: ...`` — load, use, always release.
+
+    Everything before ``yield`` runs on ``__enter__``; the ``finally`` runs on
+    ``__exit__`` whether the body finished, ``return``-ed or raised, so a lazy
+    ``.bin`` never leaks its mmap. The exception itself is not swallowed: it
+    is re-raised at the ``yield`` and propagates after the cleanup.
+    """
+    index = load(path, fmt, lazy=lazy)
+    try:
+        yield index
+    finally:
+        index.close()
+
+
+def _portable_meta(index: Index) -> dict:
+    """The JSON-safe part of ``index.meta`` (e.g. the corpus root)."""
+    return {k: v for k, v in index.meta.items() if isinstance(v, str | int | float | bool)}
 
 
 # --- json ------------------------------------------------------------------
@@ -110,6 +134,7 @@ def _save_json(index: Index, path: Path) -> None:
         "has_positions": index.has_positions,
         "doc_lengths": lengths,
         "doc_meta": metas,
+        "meta": _portable_meta(index),
         "postings": postings,
     }
     with path.open("w", encoding="utf-8") as f:
@@ -125,7 +150,7 @@ def _load_json(path: Path) -> Index:
         term: [Posting(row[0], row[1], tuple(row[2]) if has_pos else None) for row in rows]
         for term, rows in doc["postings"].items()
     }
-    return Index(postings, doc_lengths, doc_meta, "slots", has_pos)
+    return Index(postings, doc_lengths, doc_meta, "slots", has_pos, doc.get("meta"))
 
 
 # --- bin -------------------------------------------------------------------
@@ -146,7 +171,13 @@ def _save_bin(index: Index, path: Path) -> None:
         tfs_all.extend(tfs)
     lengths, metas = _meta_rows(index)
     header = json.dumps(
-        {"n_postings": len(ids_all), "doc_lengths": lengths, "doc_meta": metas, "terms": terms},
+        {
+            "n_postings": len(ids_all),
+            "doc_lengths": lengths,
+            "doc_meta": metas,
+            "meta": _portable_meta(index),
+            "terms": terms,
+        },
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -180,6 +211,13 @@ class LazyPostings(Mapping):
     def __len__(self) -> int:
         return len(self._terms)
 
+    def close(self) -> None:
+        self._mm.close()
+
+    @property
+    def closed(self) -> bool:
+        return self._mm.closed
+
 
 def _load_bin(path: Path, lazy: bool) -> Index:
     with path.open("rb") as f:
@@ -205,4 +243,5 @@ def _load_bin(path: Path, lazy: bool) -> Index:
                 t: (allv[off : off + cnt], allv[n + off : n + off + cnt])
                 for t, off, cnt in header["terms"]
             }
-    return Index(postings, doc_lengths, doc_meta, "array", False, {"lazy": lazy})
+    meta = {**header.get("meta", {}), "lazy": lazy}
+    return Index(postings, doc_lengths, doc_meta, "array", False, meta)

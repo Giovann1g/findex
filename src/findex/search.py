@@ -1,227 +1,104 @@
-"""Boolean search over a saved index.
+"""Ranked search over a saved index (Lab 3; Boolean-only mode kept from Lab 2).
 
 Usage::
 
-    python -m findex.search index.bin "dict hash"            # implicit AND
-    python -m findex.search index.bin "asyncio OR threading"
-    python -m findex.search index.bin "generator NOT async" --engine set
+    python -m findex.search index.pkl 'python AND (async OR await) NOT java "event loop"'
+    python -m findex.search index.pkl "unicode normalization" --scorer tfidf -k 5
+    python -m findex.search index.pkl "dict hash" --repeat 2     # 2nd run: cache hit
+    python -m findex.search index.bin "generator NOT async" --boolean --engine set
 
-Query language (evaluated **left to right**, no precedence, no parentheses)::
-
-    query   := operand (op operand)*
-    op      := "AND" | "OR" | <nothing>      # nothing = AND
-    operand := ["NOT"] word
-
-Operators must be written in upper case; lower-case ``and``/``or``/``not`` are
-ordinary search words. Each word goes through the same ``tokenize`` as the
-corpus, so ``"Straße"`` finds ``strasse``; a word that tokenizes into several
-tokens (``state-of-the-art``) means the AND of them.
-
-Two engines give identical results:
-
-* ``merge`` — two-pointer merges over the doc-id-sorted postings,
-  O(len(a) + len(b)), no hashing, streams naturally;
-* ``set``   — ``set(a) & set(b)`` / ``|`` / ``-``, then ``sorted``.
+Query syntax (see ``findex.query``): implicit AND, ``AND``/``OR``/``NOT`` in
+upper case, ``( … )`` and ``"quoted phrases"`` (phrases need ``--positions``).
+``@timed`` and match-cache lines go to stderr; ``-q`` silences them.
 """
 
 from __future__ import annotations
 
 import argparse
-import time
-import tracemalloc
-from bisect import bisect_left
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+import sys
 from pathlib import Path
 
-from findex.index import Index, fmt_bytes
-from findex.tokenize import tokenize
-
-OPERATORS = {"AND", "OR", "NOT"}
-
-
-# ---------------------------------------------------------------------------
-# Two-pointer merges. Inputs: ascending sequences of unique ints.
-# ---------------------------------------------------------------------------
-def intersect(a: Sequence[int], b: Sequence[int]) -> list[int]:
-    out: list[int] = []
-    i = j = 0
-    na, nb = len(a), len(b)
-    while i < na and j < nb:
-        x, y = a[i], b[j]
-        if x == y:
-            out.append(x)
-            i += 1
-            j += 1
-        elif x < y:
-            i += 1
-        else:
-            j += 1
-    return out
+from findex import store
+from findex.index import setup_logging
+from findex.merge import ENGINES
+from findex.query import PhraseNeedsPositions, QuerySyntaxError, parse
+from findex.rank import BM25, TfIdf, search
+from findex.snippets import document_text, make_snippet
 
 
-def intersect_gallop(a: Sequence[int], b: Sequence[int]) -> list[int]:
-    """AND for skewed lengths: binary-search each id of the short list in the
-    long one, O(m log n) instead of O(m + n) — what real engines do with skip
-    pointers. Used by the benchmark to explain when merging can win."""
-    if len(a) > len(b):
-        a, b = b, a
-    out: list[int] = []
-    lo, nb = 0, len(b)
-    for x in a:
-        lo = bisect_left(b, x, lo)
-        if lo == nb:
-            break
-        if b[lo] == x:
-            out.append(x)
-    return out
-
-
-def union(a: Sequence[int], b: Sequence[int]) -> list[int]:
-    out: list[int] = []
-    i = j = 0
-    na, nb = len(a), len(b)
-    while i < na and j < nb:
-        x, y = a[i], b[j]
-        if x == y:
-            out.append(x)
-            i += 1
-            j += 1
-        elif x < y:
-            out.append(x)
-            i += 1
-        else:
-            out.append(y)
-            j += 1
-    out.extend(a[i:])
-    out.extend(b[j:])
-    return out
-
-
-def difference(a: Sequence[int], b: Sequence[int]) -> list[int]:
-    """a AND NOT b."""
-    out: list[int] = []
-    i = j = 0
-    na, nb = len(a), len(b)
-    while i < na:
-        if j == nb:
-            out.extend(a[i:])
-            break
-        x, y = a[i], b[j]
-        if x == y:
-            i += 1
-            j += 1
-        elif x < y:
-            out.append(x)
-            i += 1
-        else:
-            j += 1
-    return out
-
-
-@dataclass(frozen=True, slots=True)
-class Engine:
-    name: str
-    and_: Callable[[Sequence[int], Sequence[int]], list[int]]
-    or_: Callable[[Sequence[int], Sequence[int]], list[int]]
-    not_: Callable[[Sequence[int], Sequence[int]], list[int]]
-
-
-MERGE = Engine("merge", intersect, union, difference)
-SET = Engine(
-    "set",
-    lambda a, b: sorted(set(a) & set(b)),
-    lambda a, b: sorted(set(a) | set(b)),
-    lambda a, b: sorted(set(a) - set(b)),
-)
-ENGINES = {"merge": MERGE, "set": SET}
-
-
-# ---------------------------------------------------------------------------
-# Parsing + evaluation
-# ---------------------------------------------------------------------------
-@dataclass(frozen=True, slots=True)
-class Clause:
-    op: str  # "AND" | "OR"  (how this clause combines with what came before)
-    negated: bool
-    terms: tuple[str, ...]  # normalized tokens of one query word (AND-ed together)
-
-
-def parse(query: str) -> list[Clause]:
-    clauses: list[Clause] = []
-    op, negated = "AND", False
-    for word in query.split():
-        if word in OPERATORS:
-            if word == "NOT":
-                negated = not negated
-            else:
-                op = word
-            continue
-        terms = tuple(tokenize(word))
-        if not terms:  # pure punctuation
-            continue
-        clauses.append(Clause(op, negated, terms))
-        op, negated = "AND", False
-    return clauses
-
-
-def _word_docs(index: Index, terms: tuple[str, ...], engine: Engine) -> Sequence[int]:
-    docs = index.doc_ids(terms[0])
-    for t in terms[1:]:
-        docs = engine.and_(docs, index.doc_ids(t))
-    return docs
-
-
-def evaluate(index: Index, query: str | list[Clause], engine: Engine = MERGE) -> list[int]:
-    clauses = parse(query) if isinstance(query, str) else query
-    if not clauses:
-        return []
-    everything = range(index.n_docs)  # doc_ids are dense 0..N-1
-    result: Sequence[int] | None = None
-    for c in clauses:
-        docs = _word_docs(index, c.terms, engine)
-        if result is None:  # first operand
-            result = engine.not_(everything, docs) if c.negated else docs
-        elif c.op == "OR":
-            result = engine.or_(result, engine.not_(everything, docs) if c.negated else docs)
-        else:  # AND
-            result = engine.not_(result, docs) if c.negated else engine.and_(result, docs)
-    return list(result or ())
-
-
-def main(argv: list[str] | None = None) -> None:
-    from findex import store
-
-    p = argparse.ArgumentParser(prog="python -m findex.search", description=__doc__)
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="python -m findex.search",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("index", type=Path, help="file written by python -m findex.index")
     p.add_argument("query")
+    p.add_argument("-k", type=int, default=10, help="how many results")
+    p.add_argument("--scorer", choices=["bm25", "tfidf"], default="bm25")
+    p.add_argument("--k1", type=float, default=1.5, help="BM25 tf saturation")
+    p.add_argument("--b", type=float, default=0.75, help="BM25 length normalization")
     p.add_argument("--engine", choices=list(ENGINES), default="merge")
+    p.add_argument("--boolean", action="store_true", help="unranked matches (Lab 2 mode)")
+    p.add_argument("--repeat", type=int, default=1, help="run the query N times")
+    p.add_argument("--no-snippets", action="store_true")
+    p.add_argument("--root", type=Path, default=None, help="corpus dir, if moved since build")
+    p.add_argument(
+        "--mark",
+        choices=["ansi", "md", "brackets", "none"],
+        default=None,
+        help="how to highlight terms (default: ansi on a terminal, else md)",
+    )
     p.add_argument("--format", choices=store.FORMATS, default=None)
     p.add_argument("--lazy", action="store_true", help=".bin only: mmap, decode on demand")
-    p.add_argument("--show", type=int, default=10, help="how many results to print")
+    p.add_argument("-q", "--quiet", action="store_true", help="no @timed / cache log lines")
     args = p.parse_args(argv)
+    setup_logging(args.quiet)
+    mark = args.mark or ("ansi" if sys.stdout.isatty() else "md")
+    scorer = BM25(args.k1, args.b) if args.scorer == "bm25" else TfIdf()
+    engine = ENGINES[args.engine]
 
-    tracemalloc.start()
-    t0 = time.perf_counter()
-    index = store.load(args.index, args.format, lazy=args.lazy)
-    t_load = time.perf_counter() - t0
-    t0 = time.perf_counter()
-    hits = evaluate(index, args.query, ENGINES[args.engine])
-    t_query = time.perf_counter() - t0
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    try:
+        node = parse(args.query)
+    except QuerySyntaxError as exc:
+        print(f"query error: {exc}", file=sys.stderr)
+        return 2
+    print(f"query:  {args.query}")
+    print(f"tree:   {node!r}")
 
-    print(f"query:   {args.query!r}  -> {[c.terms for c in parse(args.query)]}")
-    print(f"hits:    {len(hits):,} of {index.n_docs:,} documents   [engine={args.engine}]")
-    for doc_id in hits[: args.show]:
-        m = index.doc_meta[doc_id]
-        print(f"  {doc_id:>5}  {m.title[:60]:<60}  {m.path}")
-    if len(hits) > args.show:
-        print(f"  ... and {len(hits) - args.show:,} more")
-    print(f"load:    {t_load * 1000:.1f} ms")
-    print(f"query:   {t_query * 1000:.3f} ms")
-    print(f"peak memory: {fmt_bytes(peak)}")
+    with store.open_index(args.index, args.format, lazy=args.lazy) as ix:
+        print(f"index:  {ix!r}")
+        if node is None:
+            print("empty query")
+            return 0
+        try:
+            for _ in range(args.repeat):
+                if args.boolean:
+                    hits = ix.match(node, engine)
+                else:
+                    results = search(ix, node, scorer=scorer, k=args.k, engine=engine)
+        except PhraseNeedsPositions as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+        if args.boolean:
+            print(f"\n{len(hits):,} of {ix.num_docs:,} documents match [engine={engine.name}]")
+            for doc_id in hits[: args.k]:
+                m = ix.doc_meta[doc_id]
+                print(f"  {doc_id:>5}  {m.title[:60]:<60}  {m.path}")
+            return 0
+
+        total = len(ix.match(node, engine)) if results else 0
+        print(f"\n{total:,} matching documents, top {len(results)} by {scorer!r}:\n")
+        terms = node.terms()
+        for rank, r in enumerate(results, start=1):
+            print(f"{rank:>2}. {r.score:7.3f}  {r.title}  ({ix.doc_meta[r.doc_id].path})")
+            if not args.no_snippets:
+                text = document_text(ix, r.doc_id, args.root)
+                if text is not None:
+                    print(f"    {make_snippet(text, terms, mark=mark)}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
