@@ -11,3 +11,7 @@ wheels/
 
 # Corpus — never committed
 data/
+
+# Built indexes — artifacts, not sources
+/index.*
+*.pkl

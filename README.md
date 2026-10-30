@@ -34,6 +34,13 @@ uv run python -m findex.stats data/              # статистика (lazy, �
 uv run python -m findex.stats data/ --limit 100  # лише перші 100 документів (itertools.islice)
 uv run python -m findex.stats data/ --mode eager # «жадібна» версія через списки
 uv run python -m findex.bench data/ --limits 50 150 300 0   # таблиця eager vs lazy
+
+# Lab 2 — інвертований індекс
+uv run python -m findex.index data/ --out index.bin          # побудувати й зберегти
+uv run python -m findex.search index.bin "dict hash"          # пошук (AND за замовчуванням)
+uv run python -m findex.search index.bin "asyncio OR threading NOT thread" --engine set
+uv run python -m findex.bench_index data/                     # таблиці пам'яті та форматів
+uv run python -m findex.bench_search index.bin                # merge vs set
 uv run pytest                                     # тести
 uv run ruff check . && uv run ruff format --check .
 ```
@@ -46,9 +53,15 @@ src/findex/
   tokenize.py  tokenize(text) -> Iterator[str]              # генератор на re.finditer
   stats.py     ліниве й «жадібне» обчислення статистики + CLI
   bench.py     вимірювання eager vs lazy в окремих процесах
+  index.py     Posting, DocMeta, Index, build_index + CLI     # Lab 2
+  search.py    парсер запитів, merge/set-движки + CLI         # Lab 2
+  store.py     save/load: pickle, json, власний .bin (array)  # Lab 2
+  bench_index.py   пам'ять трьох layout-ів + формати          # Lab 2
+  bench_search.py  merge vs set на частих і рідкісних термах   # Lab 2
 tests/
   test_tokenize.py  10 перевірок правил токенізації
   test_corpus.py    генераторність, биті кодування, .gz, JSON-lines, eager == lazy
+  test_index.py     записи, побудова, merge, запити, round-trip усіх форматів
 ```
 
 `iter_documents` підтримує дерево каталогів (`*.txt`, `*.md`, `*.rst`, а також їхні `*.gz`),
@@ -123,3 +136,176 @@ Python 3.13, Linux x86-64. Кожен запуск — окремий проце
 `re.sub` — кожна повертає новий рядок) займає ще кілька МіБ; саме тому пік зростає
 стрибкоподібно, коли до вибірки потрапляє великий файл. Час однаковий: роботу (регулярка
 + нормалізація) виконано ту саму, генератори лише не зберігають проміжні результати.
+
+---
+
+# Лаба 2 — інвертований індекс
+
+## Що побудовано
+
+`build_index(docs)` за **один прохід** по лінивому конвеєру з лаби 1 будує:
+
+| Структура | Тип | Для чого |
+|---|---|---|
+| `postings` | `dict[str, list[Posting]]` | терм → постінги, **відсортовані за `doc_id`** |
+| `doc_lengths` | `dict[int, int]` | кількість токенів документа (BM25 у лабі 3) |
+| `doc_meta` | `dict[int, DocMeta]` | шлях і заголовок для показу результату |
+
+```python
+@dataclass(frozen=True, slots=True)
+class Posting:
+    doc_id: int
+    tf: int
+    positions: tuple[int, ...] | None = None  # лише з --positions
+
+
+@dataclass(frozen=True, slots=True)
+class DocMeta:
+    doc_id: int
+    path: str
+    title: str  # перший заголовок reST, ролі на кшталт :mod:`!x` прибрано
+```
+
+Обидва класи незмінні та хешовані, тож їх можна класти в `set` (тест
+`test_records_are_frozen_slotted_hashable`). Постінги збираються в `defaultdict(list)`.
+Для кожного документа рахується окремий `Counter`, який після кінця документа «зливається»
+в постінги й відкидається. `doc_id` — це щільні числа `0..N-1` у порядку потоку, і кожен
+документ дописується **після** попередніх. Тому кожен список постінгів відсортований
+за побудовою, окреме сортування не потрібне.
+
+Повний корпус: **560 документів, 41 008 термів, 328 804 постінги** (у середньому 8 на терм).
+
+## Boolean-пошук
+
+```
+query   := operand (op operand)*        # обчислюється зліва направо, без пріоритетів
+op      := AND | OR | <нічого> (= AND)
+operand := [NOT] слово
+```
+
+Оператори пишуться ВЕЛИКИМИ літерами, малі `and`/`or`/`not` — звичайні слова. Кожне слово
+проходить той самий `tokenize`, що й корпус (`Straße` знайде `strasse`), а слово з дефісом
+стає AND своїх частин. `NOT x` на початку дає доповнення до всіх документів.
+
+* `--engine merge` — двовказівникові `intersect` / `union` / `difference`, O(m + n), без хешування;
+* `--engine set` — `set(a) & set(b)` / `|` / `-`, потім `sorted`.
+
+```text
+$ uv run python -m findex.search index.bin "generator NOT async" --show 3
+query:   'generator NOT async'  -> [('generator',), ('async',)]
+hits:    54 of 560 documents   [engine=merge]
+      4  About this documentation                                      python-docs/about.rst
+     20  Pending removal in Python 3.21                                python-docs/deprecations/pending-removal-in-3.21.rst
+     32  secrets --- Generate secure random numbers for managing secr  python-docs/library/secrets.rst
+  ... and 51 more
+load:    517.1 ms
+query:   1.081 ms
+peak memory: 21.6 MiB
+```
+
+CLI міряє час під увімкненим `tracemalloc` (щоб заразом показати пік пам'яті), тому
+він більший за чисті цифри в таблицях нижче: той самий `load` без трасування — 68 мс.
+
+### Бенчмарк merge vs set
+
+Вимірюється лише сама булева операція (найкращий із 5 × 2000 викликів). Обидва движки
+отримують ті самі списки `doc_id`. Пару рідкісних термів вибрано з hapax legomena (df = 1,
+tf = 1) з фіксованим seed.
+
+| Terms | df | Op | Hits | merge, µs | set, µs | Faster | merge+bisect, µs |
+|---|---|---|---:|---:|---:|---|---:|
+| 2 most common: `the`, `in` | 552, 536 | AND | 535 | 40.89 | 22.97 | set ×1.8 | 50.20 |
+| 2 most common: `the`, `in` | 552, 536 | OR | 553 | 41.33 | 20.35 | set ×2.0 | — |
+| 2 most common: `the`, `in` | 552, 536 | AND NOT | 17 | 35.66 | 14.14 | set ×2.5 | — |
+| 2 rarest: `whitacre`, `throttle` | 1, 1 | AND | 0 | 0.14 | 0.23 | merge ×1.7 | 0.13 |
+| 2 rarest: `whitacre`, `throttle` | 1, 1 | OR | 2 | 0.24 | 0.28 | merge ×1.2 | — |
+| 2 rarest: `whitacre`, `throttle` | 1, 1 | AND NOT | 1 | 0.20 | 0.25 | merge ×1.3 | — |
+| common + rare: `the`, `whitacre` | 552, 1 | AND | 1 | 27.81 | 4.86 | set ×5.7 | 0.23 |
+| common + rare: `the`, `whitacre` | 552, 1 | OR | 552 | 32.29 | 10.59 | set ×3.0 | — |
+| common + rare: `the`, `whitacre` | 552, 1 | AND NOT | 551 | 31.82 | 10.58 | set ×3.0 | — |
+
+**Чому так.** Асимптотика однакова, O(m + n): merge проходить обидва списки, а set хешує
+обидва. На довгих списках виграє `set` приблизно вдвічі, бо хешування й перетин написано
+на C, а цикл merge виконує інтерпретатор Python, ~10 байткод-операцій на крок. На
+коротких списках виграє merge: `set` платить фіксовану ціну за створення двох множин і
+`sorted`, а merge робить один-два порівняння. На перекошеній парі (552 і 1) звичайний merge
+усе одно проходить усі 552 елементи. Справжні рушії тут роблять «галоп» (skip pointers):
+двійковий пошук кожного id короткого списку в довгому, O(m log n). Колонка `merge+bisect`
+показує 0,23 мкс — у 21 раз швидше за set. Крім того, merge не потребує пам'яті під
+множини і може працювати потоково, а set — ні.
+
+## Збереження: три формати
+
+`store.save(index, path)` / `store.load(path)`, формат визначається за розширенням.
+
+* **`pickle`** (`.pkl`) — увесь граф об'єктів `Index`. ⚠️ **Ніколи не завантажуйте чужий
+  `.pkl`.** Pickle — це не дані, а програма для віртуальної машини pickle: опкод `REDUCE`
+  викликає будь-яку функцію, яку можна імпортувати, з будь-якими аргументами. Тож
+  підроблений файл виконає, наприклад, `os.system(...)` вже в момент `pickle.load`.
+  Попередження також є в `store.py`.
+* **`json`** (`.json`) — безпечний і читабельний; постінги як пари `[doc_id, tf]`.
+* **`bin`** (`.bin`) — власний формат на `array('I')`: `b"FIDX"` + версія + JSON-заголовок
+  (`[term, offset, count]`, метадані) + усі `doc_id` підряд + усі `tf` підряд (uint32 LE).
+  `load(path, lazy=True)` / `findex.search --lazy` робить `mmap` файлу і декодує постінги
+  терму лише тоді, коли запит його торкається.
+
+| Format | Loads into | File size | Save | Load | Index in RAM after load |
+|---|---|---:|---:|---:|---:|
+| `pickle` of `slots` | `list[Posting]` (slots) | 5.6 MiB | 1355 ms | 704.6 ms | 32.8 MiB |
+| `pickle` of `array` | `array` pairs | 4.4 MiB | 149 ms | 85.4 ms | 15.2 MiB |
+| `json` | `list[Posting]` (slots) | 3.1 MiB | 941 ms | 490.4 ms | 31.7 MiB |
+| `bin` | `array` pairs | 3.5 MiB | 119 ms | 68.1 ms | 14.0 MiB |
+| `bin` (`--lazy`) | lazy `mmap`, decoded per term | 3.5 MiB | 119 ms | 56.4 ms | 6.3 MiB |
+
+`json` виявився навіть меншим за `bin`. Причина: у JSON мале число займає 1–3 байти
+(`[12,3]`), а в `bin` кожне — рівно 4 байти. Стиснення різниць між сусідніми `doc_id`
+(gap encoding, stretch) зробило б `bin` суттєво меншим. Час завантаження `bin` --lazy майже
+весь іде на розбір JSON-заголовка (41 тис. термів). Дані постінгів не читаються, доки їх не
+попросять.
+
+## Дослідження пам'яті: три представлення постінгів
+
+Той самий корпус, кожен рядок — в окремому процесі (`python -m findex.bench_index data/`).
+Пікова пам'ять і «Index in RAM» (що лишилося після побудови) — за `tracemalloc`, час —
+найкращий із 3 запусків без трасування. Файл — `pickle` відповідного представлення.
+
+| Postings representation | Peak memory (build) | Index in RAM | Build | Pickle file | Save | Load |
+|---|---:|---:|---:|---:|---:|---:|
+| `list[Posting]`, plain `@dataclass` | 40.3 MiB | 39.2 MiB | 2.90 s | 7.5 MiB | 429 ms | 261 ms |
+| `list[Posting]`, `slots=True` | 28.4 MiB | 26.6 MiB | 2.83 s | 5.6 MiB | 1062 ms | 622 ms |
+| `array('I')` pairs (doc_ids, tfs) | 19.1 MiB | 15.3 MiB | 2.77 s | 4.4 MiB | 126 ms | 70 ms |
+| `list[Posting]`, `slots=True` + positions | 99.2 MiB | 97.8 MiB | 3.70 s | 11.0 MiB | 1949 ms | 1059 ms |
+
+**Куди пішли байти** (виміряно на 1 млн екземплярів і перевірено на індексі):
+
+* **Plain dataclass — ≈ 104 Б на постінг**: 8 Б на слот у списку + ≈ 96 Б сам об'єкт
+  (заголовок, вказівник на тип, керований `__dict__` з місцем під атрибути). Цілі числа
+  майже нічого не коштують: `tf` здебільшого < 257 (кешовані малі int), а один об'єкт
+  `doc_id` спільний для всіх постінгів документа.
+* **`slots=True` — ≈ 64 Б на постінг**: 8 Б слот + 56 Б об'єкт (заголовок 16 Б + три
+  слоти по 8 Б, без `__dict__`). Різниця 40 Б × 328 804 = 12,6 МіБ, що точно збігається
+  з 39,2 − 26,6. Ціна: не можна додати атрибут, якого немає у `__slots__`.
+* **`array('I')` — 8 Б корисних даних на постінг** (два uint32), але кожен терм має два
+  об'єкти `array` по ~80 Б заголовка плюс запас на дописування. При 8 постінгах на терм
+  заголовки (≈ 7 МіБ) переважують дані (2,5 МіБ). Тому виграш лише 1,7×, а не 8×. Решта
+  15,3 МіБ — словник на 41 тис. термів (0,9 МіБ), самі рядки-терми (2,0 МіБ) і `doc_meta`.
+  Один спільний масив зі зсувами, як у `.bin`, прибрав би цю ціну.
+* **Позиції — +71 МіБ (×3,7)**: 1,8 млн позицій, і кожна — окремий `int` > 256
+  (32 Б об'єкт + 8 Б слот у кортежі), плюс заголовки 328 тис. кортежів. У файлі це лише
+  +5,4 МіБ, бо pickle пише числа компактно. Через це позиції вмикаються прапорцем `--positions`.
+* **Чому pickle `slots` повільніший за plain.** Для `slots=True` dataclass генерує
+  Python-функції `__getstate__`/`__setstate__`, і pickle викликає їх для кожного з 328 тис.
+  об'єктів. Звичайний екземпляр pickle серіалізує через `__dict__` на C-шляху.
+  `array` серіалізується одним блоком байтів, тому він найшвидший.
+
+## REPL-експерименти
+
+| Експеримент | Результат |
+|---|---|
+| `sys.getsizeof` dict під час вставки | розширення на 1, 6, 11, 22, 43, 86, 171 ключах (≈ ⅔ заповнення) |
+| `__hash__` повертає константу | 1 000 ключів: 34,8 мс проти 0,3 мс; 2 000: 120 мс (×3,5 за ×2 даних — O(n²)) |
+| `__eq__` без `__hash__` | `Cls.__hash__ is None` — клас стає нехешованим |
+| `hash("hello")` у двох запусках | різні значення; з `PYTHONHASHSEED=0` — однакові |
+| `{[1]: 1}`, `hash((1, [2]))` | `TypeError: unhashable type: 'list'` |
+| 1 млн екземплярів (+ слот + int) | plain 136 Б, slots 96 Б на елемент |
+| `list` vs `array('I')` з 1 млн int | 40 Б vs 4,1 Б на елемент |
