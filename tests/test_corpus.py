@@ -49,3 +49,40 @@ def test_lazy_and_eager_agree(tmp_path):
         eager.counts,
     )
     assert lazy.counts["world"] == 2
+
+
+def test_count_documents_without_reading(tmp_path):
+    from findex.corpus import count_documents
+
+    root = make_corpus(tmp_path)
+    assert count_documents(root) == len(list(iter_documents(root)))
+    assert count_documents(root / "a.txt") == 1  # a single file is one document
+    (tmp_path / "x.jsonl").write_text("{}", encoding="utf-8")
+    assert count_documents(tmp_path) is None  # JSON lines: unknown until read
+    assert count_documents(tmp_path / "x.jsonl") is None
+
+
+def test_single_text_file_is_a_corpus(tmp_path):
+    path = tmp_path / "one.md"
+    path.write_text("just one", encoding="utf-8")
+    [doc] = iter_documents(path)
+    assert (doc.doc_id, doc.text) == ("one.md", "just one")
+
+
+def test_unreadable_file_is_skipped_with_a_warning(tmp_path, caplog):
+    from findex.corpus import read_text
+
+    assert read_text(tmp_path / "missing.txt") is None
+    assert "skipping" in caplog.text
+
+
+def test_stats_cli_lazy_and_eager_agree(tmp_path, capsys):
+    from findex.stats import main
+
+    root = make_corpus(tmp_path)
+    main([str(root), "--top", "3"])
+    lazy = capsys.readouterr().out
+    main([str(root), "--top", "3", "--mode", "eager", "--no-trace"])
+    eager = capsys.readouterr().out
+    assert "tokens:          8" in lazy and "tokens:          8" in eager
+    assert "peak memory:" in lazy and "n/a" in eager

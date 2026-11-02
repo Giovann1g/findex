@@ -41,7 +41,7 @@ from collections.abc import Iterator
 
 WORD_RE = re.compile(r"[^\W_]+(?:['_][^\W_]+)*")
 
-_APOSTROPHES = {ord(c): "'" for c in "’‘ʼ`"}
+_APOSTROPHES: dict[int, str | None] = {ord(c): "'" for c in "’‘ʼ`"}
 _APOSTROPHES[0x00AD] = None  # soft hyphen
 
 

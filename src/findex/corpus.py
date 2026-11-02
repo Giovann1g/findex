@@ -44,7 +44,7 @@ def _is_jsonl(path: Path) -> bool:
     return path.name.endswith((".jsonl", ".jsonl.gz"))
 
 
-def _read_text(path: Path) -> str | None:
+def read_text(path: Path) -> str | None:
     """Read one file as UTF-8. Bad bytes are replaced (and logged), not fatal."""
     try:
         opener = gzip.open if path.suffix == ".gz" else open
@@ -82,7 +82,7 @@ def iter_documents(root: Path) -> Iterator[Document]:
         if _is_jsonl(root):
             yield from _iter_jsonl(root)
         else:
-            text = _read_text(root)
+            text = read_text(root)
             if text is not None:
                 yield Document(root.name, root, text)
         return
@@ -96,6 +96,22 @@ def iter_documents(root: Path) -> Iterator[Document]:
         if _is_jsonl(path):
             yield from _iter_jsonl(path)
         elif _is_text_file(path):
-            text = _read_text(path)
+            text = read_text(path)
             if text is not None:
                 yield Document(path.relative_to(root).as_posix(), path, text)
+
+
+def count_documents(root: Path) -> int | None:
+    """How many documents ``iter_documents(root)`` will yield, from file names
+    alone (no file is read), or ``None`` when that needs reading (JSON lines).
+    Used for the length of the CLI progress bar."""
+    root = Path(root)
+    if root.is_file():
+        return None if _is_jsonl(root) else 1
+    n = 0
+    for path in root.rglob("*"):
+        if _is_jsonl(path):
+            return None
+        if path.is_file() and _is_text_file(path):
+            n += 1
+    return n

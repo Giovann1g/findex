@@ -10,6 +10,9 @@ the query ``Straße``.
 The *best* match is the one whose ±width neighbourhood contains the most
 distinct query terms (then the most hits, then the earliest) — found in one
 sliding-window pass over the hits.
+
+:func:`snippet_parts` returns ``(text, is_match)`` segments, so the same
+snippet can be rendered as rich markup (CLI table), ``**md**`` or plain text.
 """
 
 from __future__ import annotations
@@ -18,9 +21,9 @@ import re
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from findex.corpus import _read_text
+from findex.corpus import read_text
 from findex.tokenize import tokenize
 
 if TYPE_CHECKING:
@@ -30,12 +33,15 @@ if TYPE_CHECKING:
 # an inner apostrophe or underscore, and possibly carrying combining marks.
 SPAN_RE = re.compile(r"[^\W_]+(?:[̀-ͯ]+[^\W_]*|['’‘ʼ_][^\W_]+)*")
 
-MARKS = {
+type Mark = Literal["ansi", "md", "brackets", "none"]
+MARKS: dict[Mark, tuple[str, str]] = {
     "ansi": ("\x1b[1;33m", "\x1b[0m"),
     "md": ("**", "**"),
     "brackets": ("[", "]"),
     "none": ("", ""),
 }
+
+type Part = tuple[str, bool]  # (text, is_match)
 
 
 def iter_spans(text: str) -> Iterator[tuple[str, int, int]]:
@@ -64,14 +70,30 @@ def _best_hit(hits: list[tuple[int, int, str]], width: int) -> int:
     return best_i
 
 
-def make_snippet(text: str, terms: Iterable[str], width: int = 80, mark: str = "md") -> str:
-    """One line of context around the best match, query terms marked."""
-    terms = frozenset(terms)
-    open_, close = MARKS[mark]
-    hits = [(s, e, tok) for tok, s, e in iter_spans(text) if tok in terms]
+def _squash(parts: list[Part]) -> list[Part]:
+    """Collapse runs of whitespace across part boundaries into single spaces."""
+    out: list[Part] = []
+    prev_space = True  # also strips leading whitespace
+    for text, hit in parts:
+        squashed = re.sub(r"\s+", " ", text)
+        if prev_space:
+            squashed = squashed.lstrip()
+        if squashed:
+            out.append((squashed, hit))
+            prev_space = squashed.endswith(" ")
+    if out and out[-1][0].endswith(" "):
+        text, hit = out[-1]
+        out[-1] = (text.rstrip(), hit)
+    return out
+
+
+def snippet_parts(text: str, terms: Iterable[str], width: int = 80) -> list[Part]:
+    """One line of context around the best match as ``(text, is_match)`` parts."""
+    wanted = frozenset(terms)
+    hits = [(s, e, tok) for tok, s, e in iter_spans(text) if tok in wanted]
     if not hits:  # e.g. a NOT-only query: show the beginning of the document
         head = " ".join(text[: 2 * width].split())
-        return head + (" …" if len(text) > 2 * width else "")
+        return [(head + (" …" if len(text) > 2 * width else ""), False)]
     anchor_start, anchor_end, _ = hits[_best_hit(hits, width)]
     lo = max(0, anchor_start - width)
     hi = min(len(text), anchor_end + width)
@@ -84,21 +106,35 @@ def make_snippet(text: str, terms: Iterable[str], width: int = 80, mark: str = "
         if hi == len(text) or text[hi].isspace():
             break
         hi += 1
-    parts, pos = [], lo
+    parts: list[Part] = [("… ", False)] if lo > 0 else []
+    pos = lo
+    body: list[Part] = []
     for s, e, _ in hits:
         if s < lo or e > hi:
             continue
-        parts += [text[pos:s], open_, text[s:e], close]
+        body += [(text[pos:s], False), (text[s:e], True)]
         pos = e
-    parts.append(text[pos:hi])
-    body = " ".join("".join(parts).split())  # newlines/indentation -> single spaces
-    return ("… " if lo > 0 else "") + body + (" …" if hi < len(text) else "")
+    body.append((text[pos:hi], False))
+    parts += _squash(body)
+    if hi < len(text):
+        parts.append((" …", False))
+    return parts
+
+
+def make_snippet(text: str, terms: Iterable[str], width: int = 80, mark: Mark = "md") -> str:
+    """The snippet as one string, matches wrapped in the chosen markers."""
+    open_, close = MARKS[mark]
+    return "".join(
+        f"{open_}{t}{close}" if hit else t for t, hit in snippet_parts(text, terms, width)
+    )
 
 
 def document_text(index: Index, doc_id: int, root: str | Path | None = None) -> str | None:
     """Re-read a document for its snippet; ``None`` if the corpus isn't there."""
-    root = root if root is not None else index.meta.get("root")
     if root is None:
-        return None
+        stored = index.meta.get("root")
+        if not isinstance(stored, str):  # narrowing: meta values are `object`
+            return None
+        root = stored
     path = Path(root) / index.doc_meta[doc_id].path
-    return _read_text(path) if path.is_file() else None
+    return read_text(path) if path.is_file() else None

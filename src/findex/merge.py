@@ -11,6 +11,7 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 
 def intersect(a: Sequence[int], b: Sequence[int]) -> list[int]:
@@ -89,22 +90,35 @@ def difference(a: Sequence[int], b: Sequence[int]) -> list[int]:
     return out
 
 
+type SetOp = Callable[[Sequence[int], Sequence[int]], list[int]]
+# A plain assignment, not a PEP 695 `type` statement: typer reads this annotation
+# at runtime to build CLI choices and doesn't understand `TypeAliasType` objects.
+EngineName = Literal["merge", "set"]
+
+
 @dataclass(frozen=True, slots=True)
 class Engine:
-    name: str
-    and_: Callable[[Sequence[int], Sequence[int]], list[int]]
-    or_: Callable[[Sequence[int], Sequence[int]], list[int]]
-    not_: Callable[[Sequence[int], Sequence[int]], list[int]]
+    name: EngineName
+    and_: SetOp
+    or_: SetOp
+    not_: SetOp
 
     def __repr__(self) -> str:
         return f"Engine({self.name!r})"
 
 
+def _set_and(a: Sequence[int], b: Sequence[int]) -> list[int]:
+    return sorted(set(a) & set(b))
+
+
+def _set_or(a: Sequence[int], b: Sequence[int]) -> list[int]:
+    return sorted(set(a) | set(b))
+
+
+def _set_not(a: Sequence[int], b: Sequence[int]) -> list[int]:
+    return sorted(set(a) - set(b))
+
+
 MERGE = Engine("merge", intersect, union, difference)
-SET = Engine(
-    "set",
-    lambda a, b: sorted(set(a) & set(b)),
-    lambda a, b: sorted(set(a) | set(b)),
-    lambda a, b: sorted(set(a) - set(b)),
-)
-ENGINES = {"merge": MERGE, "set": SET}
+SET = Engine("set", _set_and, _set_or, _set_not)
+ENGINES: dict[EngineName, Engine] = {"merge": MERGE, "set": SET}

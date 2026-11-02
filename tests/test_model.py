@@ -93,7 +93,7 @@ def test_pickle_skips_caches(tmp_path, index):
 
 
 def test_match_cache_hit_is_logged(index, caplog):
-    caplog.set_level(logging.INFO, logger="findex.index")
+    caplog.set_level(logging.DEBUG, logger="findex.index")
     assert index.match(parse("cat dog")) == (2,)
     assert index.match(parse("cat AND dog")) == (2,)  # same tree -> same entry
     lines = [r.getMessage() for r in caplog.records]
@@ -106,7 +106,7 @@ def test_match_returns_immutable(index):
 
 
 def test_timed_keeps_metadata_and_logs(caplog):
-    caplog.set_level(logging.INFO, logger="findex.timed")
+    caplog.set_level(logging.DEBUG, logger="findex.timed")
 
     @timed
     def work(x):
@@ -119,9 +119,9 @@ def test_timed_keeps_metadata_and_logs(caplog):
 
     assert work(21) == 42
     assert (work.__name__, work.__doc__) == ("work", "Doc.")
-    assert work.__wrapped__(1) == 2 and work.last_ms is not None
+    assert work.__wrapped__(1) == 2  # type: ignore[attr-defined]  # set by functools.wraps
     with pytest.raises(ValueError):
         loud()
     msgs = [(r.levelno, r.getMessage()) for r in caplog.records]
-    assert msgs[0][0] == logging.INFO and "work took" in msgs[0][1]
+    assert msgs[0][0] == logging.DEBUG and "work took" in msgs[0][1]
     assert msgs[1][0] == logging.WARNING and "loud took" in msgs[1][1]  # logged despite raise

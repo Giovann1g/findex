@@ -15,9 +15,13 @@ import json
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
+from typing import Literal, cast
 
-from findex.index import fmt_bytes
+from findex.index import Layout, fmt_bytes
+from findex.store import Format
 
 _CHILD = r"""
 import json, sys, time, tracemalloc, gc
@@ -54,18 +58,30 @@ print(json.dumps(res))
 """
 
 
-def child(action, root, layout="slots", positions=False, path="-", fmt="pickle",
-          lazy=False, trace=False) -> dict:  # fmt: skip
+# What a child run prints: some of build/save/load (seconds), size/resident/peak (bytes).
+type Result = dict[str, float]
+
+
+def child(
+    action: Literal["build", "load"],
+    root: Path,
+    layout: Layout = "slots",
+    positions: bool = False,
+    path: Path | str = "-",
+    fmt: Format = "pickle",
+    lazy: bool = False,
+    trace: bool = False,
+) -> Result:
     argv = [action, str(root), layout, "01"[positions], str(path), fmt, "01"[lazy], "01"[trace]]
     out = subprocess.run(
         [sys.executable, "-c", _CHILD, *argv], check=True, capture_output=True, text=True
     ).stdout
-    return json.loads(out)
+    return cast(Result, json.loads(out))  # the child prints a flat dict of numbers
 
 
-def best(repeat: int, key: str, *args, **kw) -> dict:
-    runs = [child(*args, **kw) for _ in range(repeat)]
-    return min(runs, key=lambda r: r[key])
+def best(repeat: int, key: str, run: Callable[[], Result]) -> Result:
+    """The fastest of ``repeat`` runs, judged by the timing ``key``."""
+    return min((run() for _ in range(repeat)), key=lambda r: r[key])
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -73,11 +89,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("root", type=Path)
     p.add_argument("--repeat", type=int, default=3)
     args = p.parse_args(argv)
-    root, rep = args.root, args.repeat
+    root: Path = args.root
+    rep: int = args.repeat
     tmp = Path(tempfile.mkdtemp(prefix="findex-bench-"))
 
     # --- M4: three postings layouts (+ positions), each saved with pickle ---
-    rows = [
+    rows: list[tuple[str, Layout, bool]] = [
         ("`list[Posting]`, plain `@dataclass`", "plain", False),
         ("`list[Posting]`, `slots=True`", "slots", False),
         ("`array('I')` pairs (doc_ids, tfs)", "array", False),
@@ -89,8 +106,8 @@ def main(argv: list[str] | None = None) -> None:
     for label, layout, pos in rows:
         pkl = tmp / f"{layout}{'-pos' if pos else ''}.pkl"
         mem = child("build", root, layout, pos, trace=True)
-        timed = best(rep, "build", "build", root, layout, pos, pkl, "pickle")
-        load = best(rep, "load", "load", root, path=pkl, fmt="pickle")
+        timed = best(rep, "build", partial(child, "build", root, layout, pos, pkl, "pickle"))
+        load = best(rep, "load", partial(child, "load", root, path=pkl, fmt="pickle"))
         print(f"| {label} | {fmt_bytes(mem['peak'])} | {fmt_bytes(mem['resident'])} | "
               f"{timed['build']:.2f} s | {fmt_bytes(timed['size'])} | "
               f"{timed['save'] * 1000:.0f} ms | {load['load'] * 1000:.0f} ms |")  # fmt: skip
@@ -98,7 +115,7 @@ def main(argv: list[str] | None = None) -> None:
     # --- M3: formats, same index content ---
     print("\n| Format | Loads into | File size | Save | Load | Index in RAM after load |")
     print("|---|---|---:|---:|---:|---:|")
-    fmts = [
+    fmts: list[tuple[Format, Layout, str, bool, str]] = [
         ("pickle", "slots", ".pkl", False, "`list[Posting]` (slots)"),
         ("pickle", "array", ".pkl", False, "`array` pairs"),
         ("json", "slots", ".json", False, "`list[Posting]` (slots)"),
@@ -107,8 +124,8 @@ def main(argv: list[str] | None = None) -> None:
     ]
     for fmt, layout, suffix, lazy, into in fmts:
         path = tmp / f"fmt-{fmt}-{layout}{suffix}"
-        saved = best(rep, "save", "build", root, layout, False, path, fmt)
-        load = best(rep, "load", "load", root, path=path, fmt=fmt, lazy=lazy)
+        saved = best(rep, "save", partial(child, "build", root, layout, False, path, fmt))
+        load = best(rep, "load", partial(child, "load", root, path=path, fmt=fmt, lazy=lazy))
         mem = child("load", root, path=path, fmt=fmt, lazy=lazy, trace=True)
         name = f"`{fmt}`" + (" (`--lazy`)" if lazy else "") + ("" if fmt != "pickle" else
                                                                 f" of `{layout}`")  # fmt: skip

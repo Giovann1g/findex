@@ -41,7 +41,7 @@ def test_records_are_frozen_slotted_hashable():
     assert {p, Posting(3, 2), Posting(4, 1)} == {Posting(3, 2), Posting(4, 1)}
     assert not hasattr(p, "__dict__")
     with pytest.raises(FrozenInstanceError):
-        p.tf = 5  # type: ignore[misc]
+        p.tf = 5  # type: ignore[misc]  # on purpose: the test expects FrozenInstanceError
     assert hash(DocMeta(1, "a", "A")) == hash(DocMeta(1, "a", "A"))
     assert len({DocMeta(1, "a", "A"), DocMeta(1, "a", "A")}) == 1
 

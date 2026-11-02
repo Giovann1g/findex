@@ -1,13 +1,28 @@
 [project]
 name = "findex"
-version = "0.1.0"
-description = "findex — a full-text search engine over a personal corpus (Python course project)"
+version = "0.4.0"
+description = "A full-text search engine over your own corpus: streaming indexer, BM25 ranking, Boolean/phrase queries, CLI."
 readme = "README.md"
-authors = [
-    { name = "Oleksandr Kukharskyi" }
-]
+authors = [{ name = "Oleksandr Kukharskyi" }]
 requires-python = ">=3.13"
-dependencies = []
+keywords = ["search", "inverted-index", "bm25", "tf-idf", "cli"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Environment :: Console",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
+dependencies = [
+    "rich>=15.0.0",
+    "typer>=0.27.3",
+]
+
+[project.urls]
+Repository = "https://github.com/Giovann1g/findex"
+
+[project.scripts]
+findex = "findex.cli:app"
 
 [build-system]
 requires = ["uv_build>=0.11.32,<0.12.0"]
@@ -15,7 +30,10 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.170.14",
+    "pyright>=1.1.414",
     "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.3",
 ]
 
@@ -24,3 +42,36 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = ["slow: takes more than a second; skip with -m 'not slow'"]
+
+[tool.coverage.run]
+source = ["findex"]
+branch = true
+# Research scripts that print the README tables; they run the real corpus in
+# subprocesses and are exercised by hand, not by unit tests (see README).
+omit = [
+    "*/findex/bench.py",
+    "*/findex/bench_index.py",
+    "*/findex/bench_search.py",
+    "*/findex/sanity.py",
+    "*/findex/evaluate.py",
+    "*/findex/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise AssertionError",
+    "\\.\\.\\.$",
+]

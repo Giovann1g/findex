@@ -120,8 +120,11 @@ class Phrase(Node):
         if not docs:
             return []
         wanted = set(docs)
+        # has_positions was checked above, so `positions` is never None here;
+        # `or ()` turns the Optional into a plain tuple for the type checker.
         where = [
-            {p.doc_id: p.positions for p in index[w] if p.doc_id in wanted} for w in self.words
+            {p.doc_id: p.positions or () for p in index[w] if p.doc_id in wanted}
+            for w in self.words
         ]
         # 2. in each, a start p with word i at p + i: intersect the start
         #    candidates with every later word's positions shifted back by i —

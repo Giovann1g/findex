@@ -11,20 +11,22 @@ from __future__ import annotations
 import argparse
 import random
 import timeit
+from collections.abc import Sequence
 from pathlib import Path
 
 from findex import store
-from findex.merge import ENGINES, intersect_gallop
+from findex.index import Index
+from findex.merge import ENGINES, SetOp, intersect_gallop
 
 
-def pick_terms(index) -> tuple[list[str], list[str]]:
+def pick_terms(index: Index) -> tuple[list[str], list[str]]:
     """Two largest-df terms; two hapax legomena (df == 1, tf == 1) that are
     ordinary words, picked with a fixed seed so the run is reproducible."""
-    by_df = sorted(index.postings, key=lambda t: (-index.df(t), t))
+    by_df = sorted(index, key=lambda t: (-index.df(t), t))
     common = by_df[:2]
     hapax = sorted(
         t
-        for t in index.postings
+        for t in index
         if index.df(t) == 1
         and index.tfs(t)[0] == 1
         and t.isalpha()
@@ -36,7 +38,7 @@ def pick_terms(index) -> tuple[list[str], list[str]]:
     return common, rare
 
 
-def time_op(fn, a, b, number: int) -> float:
+def time_op(fn: SetOp, a: Sequence[int], b: Sequence[int], number: int) -> float:
     """Best of 5 repeats, microseconds per call."""
     return min(timeit.repeat(lambda: fn(a, b), number=number, repeat=5)) / number * 1e6
 

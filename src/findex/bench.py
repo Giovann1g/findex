@@ -14,6 +14,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import TypedDict, cast
 
 from findex.stats import fmt_bytes
 
@@ -28,8 +29,16 @@ print(json.dumps({"docs": stats.documents, "tokens": stats.tokens,
 """
 
 
-def measure(root: Path, mode: str, limit: int, trace: bool, repeat: int = 1) -> dict:
-    best: dict | None = None
+class Measurement(TypedDict):
+    docs: int
+    tokens: int
+    vocab: int
+    elapsed: float
+    peak: int | None  # None for untraced runs
+
+
+def measure(root: Path, mode: str, limit: int, trace: bool, repeat: int = 1) -> Measurement:
+    best: Measurement | None = None
     for _ in range(repeat):
         out = subprocess.run(
             [sys.executable, "-c", _CHILD, str(root), mode, str(limit), "1" if trace else "0"],
@@ -37,7 +46,7 @@ def measure(root: Path, mode: str, limit: int, trace: bool, repeat: int = 1) -> 
             capture_output=True,
             text=True,
         ).stdout
-        res = json.loads(out)
+        res = cast(Measurement, json.loads(out))  # the child prints exactly this shape
         if best is None or res["elapsed"] < best["elapsed"]:
             best = res
     assert best is not None
@@ -59,7 +68,7 @@ def main(argv: list[str] | None = None) -> None:
             timed = measure(args.root, mode, limit, trace=False, repeat=args.repeat)
             print(
                 f"| {label} | {traced['docs']:,} | {traced['tokens']:,} | "
-                f"{fmt_bytes(traced['peak'])} | {timed['elapsed']:.2f} s | "
+                f"{fmt_bytes(traced['peak'] or 0)} | {timed['elapsed']:.2f} s | "
                 f"{traced['elapsed']:.2f} s |"
             )
 

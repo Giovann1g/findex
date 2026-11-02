@@ -10,18 +10,18 @@ Prints Markdown, ready for the README.
 from __future__ import annotations
 
 import argparse
-import logging
 from pathlib import Path
 
 from findex import store
 from findex.index import Index, Posting
-from findex.rank import BM25, TfIdf, search
+from findex.rank import BM25, SearchResult, TfIdf, search
 
 bm25, tfidf = BM25(), TfIdf()
 
 
-def rank_of(results, doc_id: int) -> int | None:
-    return next((i for i, r in enumerate(results, 1) if r.doc_id == doc_id), None)
+def rank_of(results: list[SearchResult], doc_id: int) -> int:
+    """1-based rank of ``doc_id``; the callers search with k = N, so it is there."""
+    return next(i for i, r in enumerate(results, 1) if r.doc_id == doc_id)
 
 
 def check_rare_vs_common(ix: Index, common: str, rare: str) -> None:
@@ -126,7 +126,6 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--saturation-term", default="coroutine")
     p.add_argument("--length-term", default=None)
     args = p.parse_args(argv)
-    logging.basicConfig(level=logging.WARNING)
     with store.open_index(args.index) as ix:
         print(f"Index: `{ix!r}`, average document length {ix.avg_doc_length:,.1f} tokens.\n")
         check_rare_vs_common(ix, args.common, args.rare)

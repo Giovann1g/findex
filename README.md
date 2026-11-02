@@ -1,8 +1,20 @@
 # findex
 
+[![CI](https://github.com/Giovann1g/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/Giovann1g/findex/actions/workflows/ci.yml)
+
 Власна повнотекстова пошукова система, яку я будую протягом семестру в курсі
 [Python — Build a Search Engine](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/README.md).
 Кожна лабораторна додає один крок; стан після кожної позначено git-тегом (`lab-01`, `lab-02`, …).
+З лаби 4 це встановлюваний пакет з командою `findex` (реліз `v0.4.0`).
+
+## Встановлення
+
+```bash
+uv tool install .                         # з клону репозиторію: findex з'являється в PATH
+uv tool install https://github.com/Giovann1g/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl
+uv build && uv tool install dist/findex-0.4.0-py3-none-any.whl     # або з локально зібраного wheel
+findex --help
+```
 
 ## Корпус
 
@@ -29,59 +41,59 @@
 ## Запуск
 
 ```bash
-uv sync
-uv run python -m findex.stats data/              # статистика (lazy, за замовчуванням)
-uv run python -m findex.stats data/ --limit 100  # лише перші 100 документів (itertools.islice)
-uv run python -m findex.stats data/ --mode eager # «жадібна» версія через списки
-uv run python -m findex.bench data/ --limits 50 150 300 0   # таблиця eager vs lazy
+findex index data/ --out index.pkl --positions        # індекс (смуга прогресу rich)
+findex search index.pkl 'python AND (async OR await) NOT java "event loop"'
+findex search index.pkl "unicode normalization" --scorer tfidf -k 5 --json | jq .title
+findex stats index.pkl --top 20
+findex -vv search index.pkl "dict hash"                # DEBUG: @timed і кеш запитів у stderr
 
-# Lab 2 — інвертований індекс
-uv run python -m findex.index data/ --out index.bin          # побудувати й зберегти
-uv run python -m findex.search index.bin "dict hash"          # пошук (AND за замовчуванням)
-uv run python -m findex.search index.bin "asyncio OR threading NOT thread" --engine set
-uv run python -m findex.bench_index data/                     # таблиці пам'яті та форматів
-uv run python -m findex.bench_search index.bin                # merge vs set
+# розробка
+uv sync                                                # проєкт + dev-інструменти з uv.lock
+uv run pytest                                          # 147 тестів; -m "not slow" — швидко
+uv run pytest --cov                                    # покриття
+uv run pyright && uv run ruff check . && uv run ruff format --check .
 
-# Lab 3 — ранжування, мова запитів, сніпети
-uv run python -m findex.index data/ --out index.pkl --positions   # позиції потрібні для фраз
-uv run python -m findex.search index.pkl 'python AND (async OR await) NOT java "event loop"'
-uv run python -m findex.search index.pkl "unicode normalization" --scorer tfidf -k 5
-uv run python -m findex.search index.pkl "dict hash" --repeat 2  # другий запуск — cache hit
-uv run python -m findex.sanity index.pkl                          # три перевірки рейтингу
-uv run python -m findex.evaluate index.pkl eval/queries.json      # precision@5
-uv run pytest                                     # тести
-uv run ruff check . && uv run ruff format --check .
+# дослідницькі скрипти, що друкують таблиці для README
+uv run python -m findex.stats data/ [--mode eager]     # Lab 1: eager vs lazy
+uv run python -m findex.bench data/ --limits 50 150 300 0
+uv run python -m findex.bench_index data/              # Lab 2: пам'ять і формати
+uv run python -m findex.bench_search index.bin         # Lab 2: merge vs set
+uv run python -m findex.sanity index.pkl               # Lab 3: три перевірки рейтингу
+uv run python -m findex.evaluate index.pkl eval/queries.json   # Lab 3: precision@5
 ```
+
+Розділи лаб 2–3 нижче показують команди тих версій (`python -m findex.index`,
+`python -m findex.search`); з v0.4.0 це `findex index` і `findex search`.
 
 ## Структура
 
 ```
+pyproject.toml   метадані (PEP 621), залежності, група dev, [project.scripts], ruff/pyright/pytest
+uv.lock          точні версії всіх залежностей (комітиться)
+.github/workflows/
+  ci.yml         push і PR: uv sync, ruff, ruff format, pyright, pytest + перевірка wheel
+  release.yml    тег v*: uv build і wheel + sdist у GitHub Release
 src/findex/
+  cli.py       typer-застосунок: findex index / search / stats; логування — лише тут  # Lab 4
+  __main__.py  python -m findex == findex
   corpus.py    iter_documents(root) -> Iterator[Document]   # генератор, 1 файл за раз
   tokenize.py  tokenize(text) -> Iterator[str]              # генератор на re.finditer
-  stats.py     ліниве й «жадібне» обчислення статистики + CLI
-  bench.py     вимірювання eager vs lazy в окремих процесах
-  index.py     Posting, DocMeta, Index, build_index + CLI     # Lab 2
-  search.py    парсер запитів, merge/set-движки + CLI         # Lab 2
-  store.py     save/load: pickle, json, власний .bin (array)  # Lab 2
-  bench_index.py   пам'ять трьох layout-ів + формати          # Lab 2
-  bench_search.py  merge vs set на частих і рідкісних термах   # Lab 2
-  merge.py     intersect / union / difference, рушії merge і set (з search.py)
-  query.py     Term/Phrase/And/Or/Not, лексер, парсер рекурсивним спуском  # Lab 3
-  rank.py      Scorer, TfIdf, BM25, SearchResult, search (heapq.nlargest)  # Lab 3
-  snippets.py  вікно ±80 символів навколо найкращого збігу, підсвітка     # Lab 3
-  timing.py    @timed (functools.wraps), працює і як @timed(level=...)    # Lab 3
-  sanity.py    три sanity-check рейтингу на корпусі                       # Lab 3
-  evaluate.py  precision@5 для TF-IDF і BM25                              # Lab 3
+  index.py     Posting, DocMeta, Index (Mapping), build_index
+  merge.py     intersect / union / difference, рушії merge і set
+  query.py     Term/Phrase/And/Or/Not, лексер, парсер рекурсивним спуском
+  rank.py      Scorer (Protocol), TfIdf, BM25, SearchResult, search (heapq.nlargest)
+  snippets.py  вікно ±80 символів навколо найкращого збігу, підсвітка
+  store.py     save/load/open_index: pickle, json, власний .bin (array)
+  timing.py    @timed (functools.wraps, ParamSpec)
+  stats.py, bench.py, bench_index.py, bench_search.py, sanity.py, evaluate.py — дослідницькі скрипти
 eval/
-  queries.json 10 запитів з ручною розміткою релевантних документів        # Lab 3
+  queries.json 10 запитів з ручною розміткою релевантних документів
 tests/
-  test_tokenize.py  10 перевірок правил токенізації
-  test_corpus.py    генераторність, биті кодування, .gz, JSON-lines, eager == lazy
-  test_index.py     записи, побудова, merge, запити, round-trip усіх форматів
-  test_model.py     Index як Mapping, open_index при винятку, кеш, @timed     # Lab 3
-  test_query.py     парсер: порівняння дерев, помилки, фрази                 # Lab 3
-  test_rank.py      скорери, три властивості рейтингу, SearchResult, сніпети # Lab 3
+  conftest.py       спільний корпус на диску + свіжий індекс на кожен тест       # Lab 4
+  test_pipeline.py  збірка на корпусі з conftest, Unicode, фрази, рейтинг обох скорерів  # Lab 4
+  test_cli.py       findex через typer.testing.CliRunner: вивід, --json, -vv, помилки  # Lab 4
+  test_properties.py  5 властивостей Hypothesis                                # Lab 4
+  test_tokenize.py, test_corpus.py, test_index.py, test_model.py, test_query.py, test_rank.py
 ```
 
 `iter_documents` підтримує дерево каталогів (`*.txt`, `*.md`, `*.rst`, а також їхні `*.gz`),
@@ -531,3 +543,218 @@ index:  Index(terms=41,008, docs=560, layout='slots', positions)
 обох — **фрази** (`"context manager"`, `"global interpreter lock"`: 0,2): фраза лише відбирає
 документи, а бали рахуються за окремими словами, тож `multiprocessing` зі 117 входженнями
 `lock` обходить FAQ про GIL (4 входження). Наступний крок — рахувати tf самої фрази.
+
+---
+
+# Лаба 4 — типи, тести, пакування і CLI
+
+`findex` тепер ставиться однією командою (`uv tool install .` або з wheel релізу `v0.4.0`)
+і працює з будь-якого каталогу. Перевірки, які проганяє CI на кожен push і PR:
+
+| Перевірка | Результат |
+|---|---|
+| `pyright` у режимі `strict` (усі 18 модулів `src/findex`) | **0 помилок** |
+| `ruff check`, `ruff format --check` | чисто |
+| `pytest` | **147 тестів**, з них 5 властивостей Hypothesis |
+| покриття (`pytest --cov`, рядки + гілки) | **95 %** |
+| wheel у чистому оточенні: `findex --help`, `findex --version` | працює |
+
+## Типи (pyright strict)
+
+* **`Scorer` — це `typing.Protocol`** з одним методом `score(term, posting, index)`. `TfIdf`
+  і `BM25` нічого не наслідують: pyright структурно звіряє їхні сигнатури з протоколом.
+* **Три види постінгів** (`list[Posting]`, `list[PlainPosting]`, пара `array[int]`) описано
+  явним union `PostingList`, а `Index.__getitem__` звужує його через `isinstance(plist, tuple)`.
+  Для читання постінгів є протокол `PostingLike` з read-only властивостями: їм відповідають
+  поля обох frozen-dataclass-ів.
+* **Генератори:** `iter_documents -> Iterator[Document]`, `tokenize -> Iterator[str]`,
+  `build_index(docs: Iterable[Document])`. Функції приймають найширший тип (`Iterable`), а
+  повертають найточніший (`Iterator`).
+* **`Literal`** для всіх рядкових виборів: `Layout`, `Format`, `ScorerName`, `EngineName`.
+  Ті самі типи typer перетворює на варіанти в `--help` (`<bm25|tfidf>`).
+* **PEP 695:** `type PostingList = …`, `type SetOp = …`, а `@timed` типізовано через
+  ParamSpec — `def timed[**P, R](func: Callable[P, R]) -> Callable[P, R]` — тож декорована
+  функція зберігає свою сигнатуру для pyright.
+* **JSON-файли** (`.json`, заголовок `.bin`, `eval/queries.json`) описано `TypedDict`-ами.
+* У `src/` немає жодного `# type: ignore`. У тестах їх три, кожен із коментарем, навіщо він
+  (наприклад, присвоєння полю frozen-dataclass навмисне: тест чекає `FrozenInstanceError`).
+
+Що strict-режим знайшов по суті, а не лише формально:
+
+| Знахідка | Виправлення |
+|---|---|
+| `Phrase.evaluate` ітерував `positions`, які можуть бути `None` | `p.positions or ()` після перевірки `has_positions` |
+| `pickle.load` повертає `Any`, тож «індексом» могло стати що завгодно | `isinstance(obj, Index)`, інакше `IndexFileError` |
+| `@contextmanager` над `-> Iterator[...]` у typeshed позначено застарілим | `-> Generator[Index]` |
+| лямбди в циклах бенчмарка втрачали звужений тип змінних циклу (і ловили б пастку B023) | `functools.partial` |
+| `__init__.py` досі містив заготовку `hello()` від `uv init` | опис пакета і `__version__` |
+
+Ще одна знахідка — на межі типів і рантайму. typer читає анотації **під час виконання**, і
+псевдонім, створений оператором `type Layout = Literal[...]` (PEP 695), для нього — це об'єкт
+`TypeAliasType`, а не `Literal`. Результат — `RuntimeError: Type not yet supported: Layout`.
+Тому чотири `Literal`-псевдоніми, що йдуть у CLI, записано звичайним присвоєнням, з коментарем,
+чому саме так.
+
+## Тести
+
+| Файл | Тестів | Що перевіряє |
+|---|---:|---|
+| `test_tokenize.py` | 10 | правила токенізації: регістр, кирилиця, NFC, апострофи, дефіси, цифри |
+| `test_corpus.py` | 8 | генератор, биті кодування, `.gz`, JSON-lines, `count_documents`, скрипт `stats` |
+| `test_index.py` | 26 | записи, побудова в трьох layout-ах, merge, запити, round-trip усіх форматів |
+| `test_model.py` | 10 | `Index` як `Mapping`, `open_index` при винятку, кеш запитів, `@timed` |
+| `test_query.py` | 34 | парсер: 18 пар «запит → дерево», помилки з позицією, фрази |
+| `test_rank.py` | 15 | скорери, `SearchResult`, сніпети |
+| `test_pipeline.py` | 18 | корпус із `conftest.py`: Unicode, фрази, **три перевірки рейтингу для обох скорерів** |
+| `test_cli.py` | 21 | `findex` через `CliRunner`: таблиця, `--json`, `-vv`, 10 очікуваних помилок |
+| `test_properties.py` | 5 | властивості Hypothesis (нижче) |
+
+**`conftest.py`** записує шість маленьких файлів (і один `.bin`, який має бути пропущений)
+один раз за сесію і дає *свіжий* індекс на кожен тест. Каталог корпусу має область
+`session`, бо його лише читають. Індекс — область `function`, бо `Index` має змінний стан
+(кеш запитів, `cached_property`, `close()`), і спільний індекс протягнув би побічні ефекти
+одного тесту в наступний.
+
+**Властивості Hypothesis** — твердження «для будь-якого входу»:
+
+1. `load(save(index))` дає той самий індекс для будь-якого корпусу, у кожному з трьох форматів,
+   з позиціями та без.
+2. Постінги будь-якого індексу строго зростають за `doc_id`, `tf > 0`, а сума всіх `tf`
+   дорівнює сумі довжин документів (кожен токен пораховано рівно раз).
+3. `intersect`, `union`, `difference` і `intersect_gallop` збігаються з операціями над `set`
+   (оракул) для будь-яких відсортованих списків.
+4. Токенізатор на будь-якому Unicode-тексті: жодного порожнього токена чи пробілу всередині, і
+   кожен токен — нерухома точка: `tokenize(t) == [t]`. Окремо прогнано на 20 000 прикладах —
+   контрприкладу немає.
+5. Парсер обертає `str()`: `parse(str(tree)) == tree` для випадкових дерев з `And`/`Or`/`Not`/
+   фраз, зокрема зі словами `and`, `or`, `not` у нижньому регістрі.
+
+Маркер `slow` (`pytest -m "not slow"` їх пропускає) стоїть на властивості токенізатора:
+~1,4 с на першому запуску, бо 300 довільних Unicode-рядків проходять NFC і `casefold`.
+
+### Покриття: 95 %
+
+```
+Name                     Stmts   Miss Branch BrPart  Cover
+src/findex/cli.py          162      7     38      4    94%
+src/findex/corpus.py        75      2     30      4    94%
+src/findex/index.py        186      4     48      5    96%
+src/findex/merge.py         85      1     28      0    99%
+src/findex/query.py        207      6     66      2    97%
+src/findex/rank.py          70      3     18      2    94%
+src/findex/snippets.py      88      4     42      7    92%
+src/findex/stats.py         74      1     16      1    98%
+src/findex/store.py        175     13     34      6    91%
+src/findex/timing.py        24      0      2      0   100%
+src/findex/tokenize.py      21      0      4      0   100%
+TOTAL                     1169     42    326     31    95%
+```
+
+**Що навмисно поза покриттям і чому:**
+
+* **Дослідницькі скрипти** `bench*.py`, `sanity.py`, `evaluate.py` виключено в
+  `[tool.coverage.run] omit`. Вони запускають справжній 15-мегабайтний корпус у підпроцесах і
+  друкують таблиці для README. Їхній результат перевіряється тим, що таблиці відтворюються, а
+  не unit-тестами, а корпус у CI не завантажується.
+* **Гілки big-endian** у `store.py` (`byteswap()`): CI і розробка — x86-64, little-endian.
+* **Обгортки несподіваних винятків** у `store.load` (`AttributeError`, `ImportError` з pickle,
+  `struct.error`): вони перетворюють збій на одну зрозумілу помилку, а відтворити кожен
+  варіант битого файлу дорожче, ніж варто.
+* **`findex --version` без встановленого пакета**, `NotImplementedError` у базовому `Node`,
+  `__repr__` кількох вузлів — гілки, що не несуть логіки.
+
+## CLI
+
+```
+findex [-v|-vv] index  CORPUS --out FILE [--positions] [--limit N] [--layout …] [--format …]
+findex [-v|-vv] search INDEX "QUERY" [-k 10] [--scorer bm25|tfidf] [--json] [--engine merge|set]
+findex [-v|-vv] stats  INDEX [--top 20] [--json]
+```
+
+**Потоки.** Дані (таблиця, рядки `--json`, статистика) йдуть у **stdout**; смуга прогресу,
+логи й помилки — у **stderr**. Тому `findex search ix.pkl "lru_cache" --json | jq .title`
+бачить лише JSON:
+
+```text
+$ findex search index.pkl "lru_cache" -k 3 --json | jq -r .title
+functools --- Higher-order functions and operations on callable objects
+fnmatch --- Unix filename pattern matching
+Programming FAQ
+```
+
+```text
+$ COLUMNS=100 findex search index.pkl '"context manager" (with OR async)' -k 3
+                       68 matching documents · top 3 by BM25(k1=1.5, b=0.75)
+┏━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ # ┃  score ┃ document                   ┃ snippet                                                ┃
+┡━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 1 │ 13.436 │ contextlib --- Utilities   │ … :class:`ContextDecorator`, but the context manager   │
+│   │        │ for with\ -statement       │ is entered and exited with :keyword:`async with`.      │
+│   │        │ contexts                   │ Decorate coroutine functions and asynchronous          │
+│   │        │ python-docs/library/conte… │ generator functions with this …                        │
+├───┼────────┼────────────────────────────┼────────────────────────────────────────────────────────┤
+│ 2 │ 12.676 │ Coroutines and tasks       │ … of the context manager. Example of catching          │
+│   │        │ python-docs/library/async… │ :exc:`TimeoutError`:: async def main(): try: async     │
+│   │        │                            │ with asyncio.timeout(10): …                            │
+├───┼────────┼────────────────────────────┼────────────────────────────────────────────────────────┤
+│ 3 │ 11.928 │ Runners                    │ … loop_factory=None, eager_tasks=False) A context      │
+│   │        │ python-docs/library/async… │ manager that simplifies *multiple* async function      │
+│   │        │                            │ calls in the same context. Sometimes several top-level │
+│   │        │                            │ async functions …                                      │
+└───┴────────┴────────────────────────────┴────────────────────────────────────────────────────────┘
+```
+
+(у терміналі збіги в сніпетах підсвічено жовтим)
+
+**Логування** налаштовується **один раз**, у `cli.py` (`RichHandler` на stderr). Бібліотечні
+модулі лише роблять `logging.getLogger(__name__)` і пишуть у стилі `log.info("indexed %d
+documents", n)`. Без прапорців видно лише WARNING; `-v` — INFO (хід індексації); `-vv` —
+DEBUG (`@timed` і кеш запитів):
+
+```text
+$ findex -vv search index.pkl "dict hash" -k 1 > /dev/null
+DEBUG    findex.timed: load took 1306.8 ms
+DEBUG    findex.index: match cache miss: (dict AND hash) -> 45 docs
+DEBUG    findex.timed: search took 1.0 ms
+DEBUG    findex.index: match cache hit: (dict AND hash) -> 45 docs
+```
+
+**Очікувані помилки** — один рядок у stderr і код виходу 1, без стека викликів (усі 10 випадків
+перевіряє `test_cli.py`):
+
+```text
+$ findex search nope.pkl x                  → error: index file not found: nope.pkl
+$ findex search index.pkl "a OR"            → error: bad query: query ends where a word, phrase or '(' was expected (at column 5)
+$ findex search index.pkl '"open'           → error: bad query: unclosed quote (at column 1)
+$ findex search README.md x                 → error: can't tell the index format of 'README.md' from its suffix (.pkl, .json, .bin); pass --format
+$ findex search README.md x --format pickle → error: README.md is not a findex pickle (invalid load key, '#'.)
+$ findex index data --out x.bin --positions → error: the .bin format has no room for positions; use .pkl or .json
+$ findex index data --out no/dir/x.pkl      → error: output directory does not exist: no/dir
+```
+
+Останні дві перевіряються **до** індексації: спершу ця помилка виникала лише після обробки
+всіх 560 документів. Несподівані збої (баги) і далі показують повний стек — так і має бути.
+
+Попутна знахідка з тестів: фраза `"loop event"` знаходить текст «event loop, event loop»,
+бо розділові знаки не є токенами. Так поводяться й справжні пошукові рушії.
+
+## Пакування, CI, реліз
+
+* `pyproject.toml` (PEP 621): метадані, версія `0.4.0`, залежності `typer` і `rich`, група
+  `dev` (pytest, pytest-cov, Hypothesis, pyright, ruff), налаштування ruff/pyright/pytest/
+  coverage; `uv.lock` у git.
+* `[project.scripts] findex = "findex.cli:app"`. Після встановлення wheel у `bin/` з'являється
+  скрипт `findex`, що робить `from findex.cli import app; sys.exit(app())`. Він записаний як
+  `entry_points.txt` у `findex-0.4.0.dist-info/` всередині wheel.
+* `uv build` дає `findex-0.4.0-py3-none-any.whl` і `findex-0.4.0.tar.gz`. Wheel перевірено в
+  чистому віртуальному оточенні поза репозиторієм: `findex --version` → `findex 0.4.0`.
+* `.github/workflows/ci.yml` — на кожен push і PR: `uv sync --locked`, `ruff check`,
+  `ruff format --check`, `pyright`, `pytest --cov`, потім збірка wheel і `findex --help` у
+  чистому оточенні. Бейдж — на початку README.
+* `.github/workflows/release.yml` — на тег `v*`: `uv build` і публікація GitHub Release з
+  wheel і sdist. Тег `v0.4.0` і є реліз:
+
+```bash
+uv tool install https://github.com/Giovann1g/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl
+findex --help
+```

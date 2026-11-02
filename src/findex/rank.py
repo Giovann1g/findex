@@ -23,19 +23,19 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from findex.merge import MERGE, Engine
 from findex.query import Node, parse
 from findex.timing import timed
 
 if TYPE_CHECKING:
-    from findex.index import Index, Posting
+    from findex.index import Index, PostingLike
 
 
 @runtime_checkable
 class Scorer(Protocol):
-    def score(self, term: str, posting: Posting, index: Index) -> float: ...
+    def score(self, term: str, posting: PostingLike, index: Index) -> float: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,10 +45,10 @@ class TfIdf:
     def idf(self, term: str, index: Index) -> float:
         return math.log(index.num_docs / index.df(term))
 
-    def score(self, term: str, posting: Posting, index: Index) -> float:
+    def score(self, term: str, posting: PostingLike, index: Index) -> float:
         return (1 + math.log(posting.tf)) * self.idf(term, index)
 
-    def __call__(self, term: str, posting: Posting, index: Index) -> float:
+    def __call__(self, term: str, posting: PostingLike, index: Index) -> float:
         return self.score(term, posting, index)
 
 
@@ -72,15 +72,27 @@ class BM25:
         norm = self.k1 * (1 - self.b + self.b * doc_length / avg_doc_length)
         return tf * (self.k1 + 1) / (tf + norm)
 
-    def score(self, term: str, posting: Posting, index: Index) -> float:
+    def score(self, term: str, posting: PostingLike, index: Index) -> float:
         dl = index.doc_length(posting.doc_id)
         return self.idf(term, index) * self.tf_part(posting.tf, dl, index.avg_doc_length)
 
-    def __call__(self, term: str, posting: Posting, index: Index) -> float:
+    def __call__(self, term: str, posting: PostingLike, index: Index) -> float:
         return self.score(term, posting, index)
 
 
-SCORERS = {"bm25": BM25, "tfidf": TfIdf}
+# A plain assignment, not a PEP 695 `type` statement: typer reads this annotation
+# at runtime to build CLI choices and doesn't understand `TypeAliasType` objects.
+ScorerName = Literal["bm25", "tfidf"]
+
+
+def make_scorer(name: ScorerName, k1: float = 1.5, b: float = 0.75) -> Scorer:
+    """Scorer by name, for CLIs and configs. ``k1``/``b`` only affect BM25."""
+    match name:
+        case "bm25":
+            return BM25(k1, b)
+        case "tfidf":
+            return TfIdf()
+
 
 # Defaults are evaluated once, at ``def`` time, and shared by every call. That
 # is the classic mutable-default bug for lists; here it's harmless because

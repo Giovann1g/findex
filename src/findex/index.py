@@ -1,12 +1,9 @@
 """The inverted index: term -> doc-id-sorted postings, built in one streaming pass.
 
-Usage::
+Build one with ``findex index data/ --out index.pkl --positions`` (see
+``findex.cli``) or from Python with :func:`build_index`.
 
-    python -m findex.index data/ --out index.bin              # build + save
-    python -m findex.index data/ --out index.pkl --positions  # keep token positions
-    python -m findex.index data/ --out index.pkl --layout array
-
-Three interchangeable postings *layouts* (the subject of the memory study):
+Three interchangeable postings *layouts* (the subject of the Lab 2 memory study):
 
 * ``plain`` — ``list[PlainPosting]``, a ``@dataclass(frozen=True)`` without slots;
 * ``slots`` — ``list[Posting]``, ``@dataclass(frozen=True, slots=True)`` (default);
@@ -19,29 +16,43 @@ is sorted by doc_id by construction — no sort step needed.
 
 from __future__ import annotations
 
-import argparse
 import logging
 import re
-import time
-import tracemalloc
 from array import array
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, lru_cache
-from itertools import islice
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
-from findex.corpus import Document, iter_documents
+from findex.corpus import Document
 from findex.merge import MERGE, Engine
 from findex.timing import timed
 from findex.tokenize import tokenize
 
+if TYPE_CHECKING:
+    from findex.query import Node
+    from findex.rank import SearchResult
+
 log = logging.getLogger(__name__)
 
+# A plain assignment, not a PEP 695 `type` statement: typer reads this annotation
+# at runtime to build CLI choices and doesn't understand `TypeAliasType` objects.
 Layout = Literal["plain", "slots", "array"]
 LAYOUTS: tuple[Layout, ...] = ("plain", "slots", "array")
+
+
+class PostingLike(Protocol):
+    """Anything that reads like a posting. Frozen dataclass fields are read-only,
+    so they satisfy these read-only properties — no inheritance needed."""
+
+    @property
+    def doc_id(self) -> int: ...
+    @property
+    def tf(self) -> int: ...
+    @property
+    def positions(self) -> tuple[int, ...] | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +82,32 @@ class DocMeta:
     title: str
 
 
-class Index(Mapping[str, Sequence[Posting]]):
+type IdArray = array[int]
+type ArrayPostings = tuple[IdArray, IdArray]  # (doc_ids, tfs)
+type PostingList = list[Posting] | list[PlainPosting] | ArrayPostings
+
+
+class CacheStats(Protocol):
+    @property
+    def hits(self) -> int: ...
+
+
+class MatchCache(Protocol):
+    """The slice of ``functools.lru_cache``'s wrapper that ``Index`` uses."""
+
+    def __call__(self, node: Node, engine: Engine, /) -> tuple[int, ...]: ...
+    def cache_info(self) -> CacheStats: ...
+    def cache_clear(self) -> None: ...
+
+
+@runtime_checkable
+class Closeable(Protocol):
+    """A postings store holding an OS resource (the mmap of a lazy ``.bin``)."""
+
+    def close(self) -> None: ...
+
+
+class Index(Mapping[str, Sequence[PostingLike]]):
     """The inverted index as a read-only mapping ``term -> postings``.
 
     Inheriting from ``collections.abc.Mapping`` and defining the three abstract
@@ -85,28 +121,28 @@ class Index(Mapping[str, Sequence[Posting]]):
 
     def __init__(
         self,
-        postings: Mapping[str, object],  # list[Posting] | list[PlainPosting] | (array, array)
+        postings: Mapping[str, PostingList],
         doc_lengths: dict[int, int],
         doc_meta: dict[int, DocMeta],
         layout: Layout = "slots",
         has_positions: bool = False,
-        meta: dict[str, object] | None = None,
+        meta: Mapping[str, object] | None = None,
     ) -> None:
         self.postings = postings
         self.doc_lengths = doc_lengths
         self.doc_meta = doc_meta
-        self.layout = layout
+        self.layout: Layout = layout
         self.has_positions = has_positions
         self.meta: dict[str, object] = dict(meta or {})
         self.closed = False
 
     # --- the Mapping protocol ------------------------------------------------
-    def __getitem__(self, term: str) -> Sequence[Posting]:
+    def __getitem__(self, term: str) -> Sequence[PostingLike]:
         plist = self.postings[term]  # KeyError for an unknown term, like a dict
-        if self.layout == "array":  # rebuild records on demand
-            ids, tfs = plist  # type: ignore[misc]
+        if isinstance(plist, tuple):  # array layout: rebuild records on demand
+            ids, tfs = plist
             return [Posting(d, t) for d, t in zip(ids, tfs, strict=True)]
-        return plist  # type: ignore[return-value]
+        return plist
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.postings)
@@ -137,14 +173,22 @@ class Index(Mapping[str, Sequence[Posting]]):
         n = self.num_docs
         return sum(self.doc_lengths.values()) / n if n else 0.0
 
+    @property
+    def num_tokens(self) -> int:
+        return sum(self.doc_lengths.values())
+
     def doc_length(self, doc_id: int) -> int:
         return self.doc_lengths[doc_id]
 
     def title(self, doc_id: int) -> str:
         return self.doc_meta[doc_id].title
 
+    def collection_frequency(self, term: str) -> int:
+        """Total occurrences of ``term`` in the corpus (sum of tf)."""
+        return sum(self.tfs(term))
+
     # --- query support -------------------------------------------------------
-    def match(self, node, engine: Engine = MERGE) -> tuple[int, ...]:
+    def match(self, node: Node, engine: Engine = MERGE) -> tuple[int, ...]:
         """Doc ids matching a parsed query (``findex.query`` node), cached.
 
         The cache is an ``lru_cache`` *per index instance* (see ``_match_cache``),
@@ -156,25 +200,25 @@ class Index(Mapping[str, Sequence[Posting]]):
         hits_before = cache.cache_info().hits
         ids = cache(node, engine)
         outcome = "hit" if cache.cache_info().hits > hits_before else "miss"
-        log.info("match cache %s: %s -> %d docs", outcome, node, len(ids))
+        log.debug("match cache %s: %s -> %d docs", outcome, node, len(ids))
         return ids
 
     @cached_property
-    def _match_cache(self):
+    def _match_cache(self) -> MatchCache:
         # Not ``@lru_cache`` on the method itself: that cache would live on the
         # class, key on ``self`` (Index is unhashable — Mapping defines __eq__)
         # and keep every index ever searched alive.
         @lru_cache(maxsize=256)
-        def match_ids(node, engine: Engine) -> tuple[int, ...]:
+        def match_ids(node: Node, engine: Engine) -> tuple[int, ...]:
             return tuple(node.evaluate(self, engine))
 
         return match_ids
 
-    def search(self, query, **kwargs):
-        """Ranked search; see :func:`findex.rank.search` for the arguments."""
+    def search(self, query: str | Node, k: int = 10) -> list[SearchResult]:
+        """Ranked BM25 search; :func:`findex.rank.search` takes more options."""
         from findex.rank import search  # rank imports this module
 
-        return search(self, query, **kwargs)
+        return search(self, query, k=k)
 
     # --- resources -----------------------------------------------------------
     def close(self) -> None:
@@ -182,17 +226,16 @@ class Index(Mapping[str, Sequence[Posting]]):
         drop caches. Idempotent; ``open_index`` calls it on exit."""
         if self.closed:
             return
-        closer = getattr(self.postings, "close", None)
-        if closer is not None:
-            closer()
-        cache = self.__dict__.pop("_match_cache", None)
+        if isinstance(self.postings, Closeable):
+            self.postings.close()
+        cache: MatchCache | None = self.__dict__.pop("_match_cache", None)
         if cache is not None:
             cache.cache_clear()
         self.closed = True
 
-    def __getstate__(self) -> dict:
+    def __getstate__(self) -> dict[str, object]:
         # Caches are derived data and an lru_cache wrapper can't be pickled.
-        state = dict(self.__dict__)
+        state: dict[str, object] = dict(self.__dict__)
         state.pop("_match_cache", None)
         state.pop("avg_doc_length", None)
         return state
@@ -203,29 +246,31 @@ class Index(Mapping[str, Sequence[Posting]]):
         plist = self.postings.get(term)
         if plist is None:
             return ()
-        if self.layout == "array":
-            return plist[0]  # type: ignore[index]
-        return [p.doc_id for p in plist]  # type: ignore[attr-defined]
+        if isinstance(plist, tuple):
+            return plist[0]
+        return [p.doc_id for p in plist]
 
     def tfs(self, term: str) -> Sequence[int]:
         plist = self.postings.get(term)
         if plist is None:
             return ()
-        if self.layout == "array":
-            return plist[1]  # type: ignore[index]
-        return [p.tf for p in plist]  # type: ignore[attr-defined]
+        if isinstance(plist, tuple):
+            return plist[1]
+        return [p.tf for p in plist]
 
     def df(self, term: str) -> int:
         plist = self.postings.get(term)
         if plist is None:
             return 0
-        return len(plist[0] if self.layout == "array" else plist)  # type: ignore[arg-type,index]
+        return len(plist[0]) if isinstance(plist, tuple) else len(plist)
 
 
 # ---------------------------------------------------------------------------
 # Building
 # ---------------------------------------------------------------------------
 _UNDERLINE = set("=-*~^#+`'\".:_")
+# :mod:`!secrets`  /  :func:`~os.path <path>`  ->  secrets / ~os.path
+_ROLE_RE = re.compile(r":[\w:.-]+:`[!~]?([^`<]+?)(?:\s*<[^>]*>)?`")
 
 
 def guess_title(text: str, fallback: str) -> str:
@@ -246,10 +291,6 @@ def guess_title(text: str, fallback: str) -> str:
     return fallback
 
 
-# :mod:`!secrets`  /  :func:`~os.path <path>`  ->  secrets / ~os.path
-_ROLE_RE = re.compile(r":[\w:.-]+:`[!~]?([^`<]+?)(?:\s*<[^>]*>)?`")
-
-
 @timed
 def build_index(
     docs: Iterable[Document], layout: Layout = "slots", positions: bool = False
@@ -260,14 +301,9 @@ def build_index(
 
     doc_lengths: dict[int, int] = {}
     doc_meta: dict[int, DocMeta] = {}
-
-    if layout == "array":
-        arrays: defaultdict[str, tuple[array, array]] = defaultdict(
-            lambda: (array("I"), array("I"))
-        )
-    else:
-        lists: defaultdict[str, list] = defaultdict(list)
-        cls = Posting if layout == "slots" else PlainPosting
+    arrays: defaultdict[str, ArrayPostings] = defaultdict(lambda: (array("I"), array("I")))
+    slotted: defaultdict[str, list[Posting]] = defaultdict(list)
+    plain: defaultdict[str, list[PlainPosting]] = defaultdict(list)
 
     for doc_id, doc in enumerate(docs):
         # Per-document accumulator, flushed into the global postings at the end
@@ -279,31 +315,36 @@ def build_index(
                 where[tok].append(n)
             doc_lengths[doc_id] = n + 1
             for term, pos in where.items():
-                lists[term].append(cls(doc_id, len(pos), tuple(pos)))
+                if layout == "slots":
+                    slotted[term].append(Posting(doc_id, len(pos), tuple(pos)))
+                else:
+                    plain[term].append(PlainPosting(doc_id, len(pos), tuple(pos)))
         else:
             counts = Counter(tokenize(doc.text))
             doc_lengths[doc_id] = counts.total()
-            if layout == "array":
-                for term, tf in counts.items():
+            for term, tf in counts.items():
+                if layout == "array":
                     ids, tfs = arrays[term]
                     ids.append(doc_id)
                     tfs.append(tf)
-            else:
-                for term, tf in counts.items():
-                    lists[term].append(cls(doc_id, tf))
+                elif layout == "slots":
+                    slotted[term].append(Posting(doc_id, tf))
+                else:
+                    plain[term].append(PlainPosting(doc_id, tf))
         fallback = Path(doc.doc_id).stem
         doc_meta[doc_id] = DocMeta(doc_id, doc.doc_id, guess_title(doc.text, fallback))
+        if (doc_id + 1) % 100 == 0:
+            log.info("indexed %d documents", doc_id + 1)
 
-    postings = dict(arrays) if layout == "array" else dict(lists)
+    postings: dict[str, PostingList]
+    if layout == "array":
+        postings = dict(arrays)
+    elif layout == "slots":
+        postings = dict(slotted)
+    else:
+        postings = dict(plain)
+    log.info("index built: %d documents, %d terms", len(doc_meta), len(postings))
     return Index(postings, doc_lengths, doc_meta, layout, positions)
-
-
-def setup_logging(quiet: bool = False) -> None:
-    """CLI logging: ``@timed`` and cache lines go to stderr, results to stdout."""
-    logging.basicConfig(
-        level=logging.WARNING if quiet else logging.INFO,
-        format="[%(name)s] %(message)s",
-    )
 
 
 def fmt_bytes(n: float) -> str:
@@ -312,51 +353,3 @@ def fmt_bytes(n: float) -> str:
             return f"{n:.1f} {unit}"
         n /= 1024
     raise AssertionError  # unreachable
-
-
-def main(argv: list[str] | None = None) -> None:
-    from findex import store  # local import: store imports this module
-
-    p = argparse.ArgumentParser(prog="python -m findex.index", description=__doc__)
-    p.add_argument("root", type=Path, help="corpus directory or .jsonl file")
-    p.add_argument("--out", type=Path, required=True, help="index file (.bin/.pkl/.json)")
-    p.add_argument("--layout", choices=LAYOUTS, default="slots")
-    p.add_argument("--positions", action="store_true", help="store token positions")
-    p.add_argument("--format", choices=store.FORMATS, default=None, help="default: by suffix")
-    p.add_argument("--limit", type=int, default=None, help="first N documents only")
-    p.add_argument("-q", "--quiet", action="store_true", help="no @timed log lines")
-    args = p.parse_args(argv)
-    setup_logging(args.quiet)
-
-    tracemalloc.start()
-    t0 = time.perf_counter()
-    index = build_index(islice(iter_documents(args.root), args.limit), args.layout, args.positions)
-    index.meta["root"] = str(args.root)  # lets search find the texts again for snippets
-    t_build = time.perf_counter() - t0
-    _, peak_build = tracemalloc.get_traced_memory()
-
-    t0 = time.perf_counter()
-    fmt = store.save(index, args.out, args.format)
-    t_save = time.perf_counter() - t0
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
-    n_postings = sum(index.df(t) for t in index)
-    print(repr(index))
-    print(f"documents:     {index.num_docs:,}")
-    print(f"terms:         {len(index):,}")
-    print(f"postings:      {n_postings:,}")
-    print(f"layout:        {index.layout}{' + positions' if index.has_positions else ''}")
-    print(f"build:         {t_build:.2f} s   (peak {fmt_bytes(peak_build)})")
-    print(f"save [{fmt}]:  {t_save:.2f} s -> {args.out} ({fmt_bytes(args.out.stat().st_size)})")
-    print(f"peak memory:   {fmt_bytes(peak)}")
-
-
-if __name__ == "__main__":
-    # `python -m findex.index` runs this file as the module `__main__`, so the
-    # classes defined here would be `__main__.Index`, `__main__.Posting` — and a
-    # pickle written now couldn't be loaded by any other program. Run the
-    # importable module's main() instead, so pickles say `findex.index.Index`.
-    from findex import index as _importable
-
-    _importable.main()
