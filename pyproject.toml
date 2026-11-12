@@ -31,6 +31,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "hypothesis>=6.170.14",
+    "matplotlib>=3.11.2",
     "pyright>=1.1.414",
     "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
@@ -64,6 +65,8 @@ omit = [
     "*/findex/bench_search.py",
     "*/findex/sanity.py",
     "*/findex/evaluate.py",
+    "*/findex/bench_parallel.py",
+    "*/findex/race.py",
     "*/findex/__main__.py",
 ]
 

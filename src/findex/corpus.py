@@ -115,3 +115,25 @@ def count_documents(root: Path) -> int | None:
         if path.is_file() and _is_text_file(path):
             n += 1
     return n
+
+
+def list_document_paths(root: Path) -> tuple[Path, list[Path]]:
+    """``(base, paths)`` of the text files ``iter_documents(root)`` would read,
+    in the same order, without reading them. Document ids are the paths
+    relative to ``base``. Used to hand *paths*, not texts, to parallel workers.
+
+    Raises ``ValueError`` for JSON-lines corpora: one file holds many documents,
+    so they can't be split by path (index those serially).
+    """
+    root = Path(root)
+    if root.is_file():
+        if _is_jsonl(root):
+            raise ValueError(f"{root} is a JSON-lines corpus; it can't be split by file path")
+        return root.parent, [root]
+    paths: list[Path] = []
+    for path in root.rglob("*"):
+        if _is_jsonl(path):
+            raise ValueError(f"{path} is a JSON-lines file; it can't be split by file path")
+        if path.is_file() and _is_text_file(path):
+            paths.append(path)
+    return root, paths

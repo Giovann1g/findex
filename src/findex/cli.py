@@ -17,6 +17,7 @@ from __future__ import annotations
 import heapq
 import json
 import logging
+import os
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
@@ -41,6 +42,7 @@ from rich.text import Text
 from findex.corpus import Document, count_documents, iter_documents
 from findex.index import Layout, build_index, fmt_bytes
 from findex.merge import ENGINES, EngineName
+from findex.parallel import ExecutorName, build_parallel
 from findex.query import PhraseNeedsPositions, QuerySyntaxError, parse
 from findex.rank import ScorerName, make_scorer, search
 from findex.snippets import Part, document_text, snippet_parts
@@ -58,6 +60,11 @@ stdout = Console()
 stderr = Console(stderr=True)
 
 LEVELS = (logging.WARNING, logging.INFO, logging.DEBUG)
+
+# Lab 5 benchmark: processes beat serial and threads on this machine, so they
+# are the default; one worker per core.
+DEFAULT_EXECUTOR: ExecutorName = "processes"
+DEFAULT_WORKERS = os.cpu_count() or 1
 
 
 def configure_logging(verbosity: int) -> None:
@@ -116,6 +123,13 @@ def index_cmd(
     fmt: Annotated[
         Format | None, typer.Option("--format", help="File format (default: from suffix).")
     ] = None,
+    executor: Annotated[
+        ExecutorName,
+        typer.Option(help="serial loop, a thread pool, or a process pool (spawn)."),
+    ] = DEFAULT_EXECUTOR,
+    workers: Annotated[
+        int, typer.Option("--workers", "-j", min=1, help="Pool size (default: CPU cores).")
+    ] = DEFAULT_WORKERS,
 ) -> None:
     """Build an index from a corpus, with a progress bar."""
     if not corpus.exists():
@@ -134,7 +148,12 @@ def index_cmd(
     total = count_documents(corpus)
     if total is not None and limit is not None:
         total = min(total, limit)
-    docs = islice(iter_documents(corpus), limit)
+    parallel = executor != "serial"
+    if parallel and total is None:  # JSON lines: one file, many documents
+        log.warning("a JSON-lines corpus can't be split by file; indexing serially")
+        parallel = False
+    if parallel and layout == "plain":
+        fail("parallel builds merge into --layout slots or array; use --executor serial")
 
     with Progress(
         SpinnerColumn(),
@@ -144,15 +163,29 @@ def index_cmd(
         TimeElapsedColumn(),
         console=stderr,
     ) as progress:
-        task = progress.add_task("indexing", total=total)
+        label = f"indexing ({executor} × {workers})" if parallel else "indexing"
+        task = progress.add_task(label, total=total)
+        if parallel:
+            # the bar advances by a chunk's documents each time a worker reports back
+            ix, stats = build_parallel(
+                corpus,
+                executor=executor,
+                workers=workers,
+                positions=positions,
+                limit=limit,
+                layout="array" if layout == "array" else "slots",
+                on_done=lambda part: progress.advance(task, part.num_docs),
+            )
+            del stats  # parallel.build_parallel already logs partial/merge times at INFO
+        else:
 
-        def tracked(stream: Iterable[Document]) -> Iterator[Document]:
-            # still one lazy pass: the bar advances as documents flow through
-            for doc in stream:
-                yield doc
-                progress.advance(task)
+            def tracked(stream: Iterable[Document]) -> Iterator[Document]:
+                # still one lazy pass: the bar advances as documents flow through
+                for doc in stream:
+                    yield doc
+                    progress.advance(task)
 
-        ix = build_index(tracked(docs), layout, positions)
+            ix = build_index(tracked(islice(iter_documents(corpus), limit)), layout, positions)
 
     ix.meta["root"] = str(corpus)  # lets `findex search` re-read texts for snippets
     try:

@@ -5,7 +5,8 @@
 Власна повнотекстова пошукова система, яку я будую протягом семестру в курсі
 [Python — Build a Search Engine](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/README.md).
 Кожна лабораторна додає один крок; стан після кожної позначено git-тегом (`lab-01`, `lab-02`, …).
-З лаби 4 це встановлюваний пакет з командою `findex` (реліз `v0.4.0`).
+З лаби 4 це встановлюваний пакет з командою `findex` (реліз `v0.4.0`); з лаби 5 індекс
+будується паралельно (`--executor processes`, за замовчуванням).
 
 ## Встановлення
 
@@ -42,6 +43,7 @@ findex --help
 
 ```bash
 findex index data/ --out index.pkl --positions        # індекс (смуга прогресу rich)
+findex index data/ -o index.pkl --executor threads -j 4   # Lab 5: serial | threads | processes
 findex search index.pkl 'python AND (async OR await) NOT java "event loop"'
 findex search index.pkl "unicode normalization" --scorer tfidf -k 5 --json | jq .title
 findex stats index.pkl --top 20
@@ -49,7 +51,7 @@ findex -vv search index.pkl "dict hash"                # DEBUG: @timed і кеш
 
 # розробка
 uv sync                                                # проєкт + dev-інструменти з uv.lock
-uv run pytest                                          # 147 тестів; -m "not slow" — швидко
+uv run pytest                                          # 163 тести; -m "not slow" — швидко
 uv run pytest --cov                                    # покриття
 uv run pyright && uv run ruff check . && uv run ruff format --check .
 
@@ -60,6 +62,9 @@ uv run python -m findex.bench_index data/              # Lab 2: пам'ять і
 uv run python -m findex.bench_search index.bin         # Lab 2: merge vs set
 uv run python -m findex.sanity index.pkl               # Lab 3: три перевірки рейтингу
 uv run python -m findex.evaluate index.pkl eval/queries.json   # Lab 3: precision@5
+uv run python -m findex.bench_parallel data/ --ft .venv-ft/bin/python   # Lab 5: таблиця + графік
+uv run python -m findex.bench_parallel data/ --io 10   # Lab 5: I/O-bound для порівняння
+uv run python -m findex.race data/                     # Lab 5: гонка на спільному Counter
 ```
 
 Розділи лаб 2–3 нижче показують команди тих версій (`python -m findex.index`,
@@ -79,6 +84,7 @@ src/findex/
   corpus.py    iter_documents(root) -> Iterator[Document]   # генератор, 1 файл за раз
   tokenize.py  tokenize(text) -> Iterator[str]              # генератор на re.finditer
   index.py     Posting, DocMeta, Index (Mapping), build_index
+  parallel.py  build_partial, merge, make_chunks, run_chunks, build_parallel         # Lab 5
   merge.py     intersect / union / difference, рушії merge і set
   query.py     Term/Phrase/And/Or/Not, лексер, парсер рекурсивним спуском
   rank.py      Scorer (Protocol), TfIdf, BM25, SearchResult, search (heapq.nlargest)
@@ -86,6 +92,10 @@ src/findex/
   store.py     save/load/open_index: pickle, json, власний .bin (array)
   timing.py    @timed (functools.wraps, ParamSpec)
   stats.py, bench.py, bench_index.py, bench_search.py, sanity.py, evaluate.py — дослідницькі скрипти
+  bench_parallel.py, race.py — дослідницькі скрипти Lab 5 (таблиця, графік, гонка)
+docs/lab05/
+  parallel.json  сирі результати бенчмарку (усі медіани, min..max, машина, IPC)
+  speedup.png    графік прискорення
 eval/
   queries.json 10 запитів з ручною розміткою релевантних документів
 tests/
@@ -93,6 +103,7 @@ tests/
   test_pipeline.py  збірка на корпусі з conftest, Unicode, фрази, рейтинг обох скорерів  # Lab 4
   test_cli.py       findex через typer.testing.CliRunner: вивід, --json, -vv, помилки  # Lab 4
   test_properties.py  5 властивостей Hypothesis                                # Lab 4
+  test_parallel.py  serial merge == Lab 4, усі executors однакові, падіння воркера, spawn  # Lab 5
   test_tokenize.py, test_corpus.py, test_index.py, test_model.py, test_query.py, test_rank.py
 ```
 
@@ -667,6 +678,7 @@ TOTAL                     1169     42    326     31    95%
 
 ```
 findex [-v|-vv] index  CORPUS --out FILE [--positions] [--limit N] [--layout …] [--format …]
+                       [--executor serial|threads|processes] [-j|--workers N]
 findex [-v|-vv] search INDEX "QUERY" [-k 10] [--scorer bm25|tfidf] [--json] [--engine merge|set]
 findex [-v|-vv] stats  INDEX [--top 20] [--json]
 ```
@@ -758,3 +770,178 @@ $ findex index data --out no/dir/x.pkl      → error: output directory does not
 uv tool install https://github.com/Giovann1g/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl
 findex --help
 ```
+
+## Lab 5: паралельна індексація і GIL
+
+### Що змінилося в коді
+
+* `build_index` розділено на **`build_partial(doc_paths, base=…, first_doc_id=…)`** і
+  **`merge(partials)`** (`parallel.py`). `build_partial` — функція рівня модуля без
+  спільного стану: вона сама читає й токенізує свої файли й повертає компактний
+  `PartialIndex` (постінги як два `array('I')` на терм, тому pickle — це сирі байти).
+  Воркерам передаються **шляхи**, а не тексти.
+* **Діапазони `doc_id` призначаються наперед**: `make_chunks` ріже список файлів на
+  суцільні шматки, приблизно рівні за байтами (не більше ⌈N/шматків⌉ файлів у шматку), і
+  кожен шматок отримує `first_doc_id` = кількість файлів перед ним. Тому `merge` лише
+  сортує частини за `first_doc_id`, перевіряє, що діапазони без дірок і перекриттів, і
+  конкатенує постінги кожного терма — вони вже відсортовані.
+* `merge([build_partial(усі шляхи)])` дає **той самий індекс, що й `build_index` з Lab 4,
+  байт у байт** (`test_serial_merge_equals_lab4_build_index`, з позиціями і без), а будь-яке
+  розбиття на шматки в будь-якому порядку надходження — той самий індекс (Hypothesis).
+* `findex index --executor {serial,threads,processes} --workers N`: однакові
+  `build_partial` і `merge` під простим циклом, `ThreadPoolExecutor` або
+  `ProcessPoolExecutor` з методом **spawn**. Тест перевіряє, що всі три пишуть однакові файли.
+* **Spawn-safe**: функція для пулу — `build_chunk` рівня модуля (лямбду чи замикання не
+  запиклиш); `python -m findex` запускає CLI лише під `if __name__ == "__main__":`, бо
+  spawn-нащадок імпортує головний модуль батька.
+* **Падіння воркера валить збірку**: `future.result()` повторно кидає виняток у батьку (для
+  процесів — з трасою воркера в `__cause__`), решта шматків скасовується
+  (`shutdown(cancel_futures=True)`), нічого не зависає. Тест — для потоків і процесів.
+
+### Машина і методика
+
+| | |
+|---|---|
+| CPU | Intel(R) Xeon(R) Processor @ 2.10GHz, **2 ядра** (`os.cpu_count()` = 2), 7 GB RAM |
+| ОС | Linux 6.18 x86_64 |
+| Python | 3.13.18 (з GIL) і 3.13.14 free-threaded (`uv venv --python 3.13t`) |
+| Корпус | 560 документів, ≈ 15 МБ (той самий, що в лабах 1–4) |
+
+`python -m findex.bench_parallel data/ --ft .venv-ft/bin/python`: кожен вимір — **окремий
+процес**, що один раз будує індекс; 5 запусків на клітинку, у таблиці медіана і min–max;
+один запуск перед усіма — прогрів page cache. **Wall** — `perf_counter` навколо побудови +
+merge; **CPU** — `os.times()` user + system процесу **разом із дочірніми** (тож CPU
+процесів-воркерів теж пораховано); **RSS** — пік `ru_maxrss` батьківського процесу;
+**Merge** — час самого `merge()`; **Speedup** — медіана serial (GIL) / медіана рядка.
+Пул отримує 4 шматки на воркер (serial — 1 шматок). Набір воркерів — {1, 2, 4, 8} ∪
+{`os.cpu_count()`} = {1, 2, 4, 8}.
+
+### Результати
+
+| Python | Executor | Workers | Wall (median) | Spread | CPU | Peak RSS (батько) | Merge | Speedup |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 3.13 | serial | 1 | 3.89 s | 3.77–4.23 | 3.86 s | 75 MiB | 0.20 s | 1.00× |
+| 3.13 | threads | 1 | 4.14 s | 4.05–4.41 | 4.11 s | 88 MiB | 0.29 s | 0.94× |
+| 3.13 | threads | 2 | 4.23 s | 4.16–4.62 | 4.20 s | 96 MiB | 0.27 s | 0.92× |
+| 3.13 | threads | 4 | 4.35 s | 4.27–4.48 | 4.31 s | 107 MiB | 0.31 s | 0.89× |
+| 3.13 | threads | 8 | 4.58 s | 4.44–4.78 | 4.56 s | 121 MiB | 0.44 s | 0.85× |
+| 3.13 | processes | 1 | 4.54 s | 4.50–4.57 | 4.55 s | 94 MiB | 0.32 s | 0.86× |
+| 3.13 | **processes** | **2** | **2.82 s** | 2.75–2.88 | 4.63 s | 96 MiB | 0.33 s | **1.38×** |
+| 3.13 | processes | 4 | 3.29 s | 3.19–3.36 | 5.26 s | 104 MiB | 0.42 s | 1.18× |
+| 3.13 | processes | 8 | 3.67 s | 3.51–3.72 | 6.17 s | 114 MiB | 0.38 s | 1.06× |
+| 3.13t | serial | 1 | 3.96 s | 3.90–4.33 | 3.91 s | 81 MiB | 0.31 s | 0.98× |
+| 3.13t | threads | 1 | 4.09 s | 3.91–4.55 | 4.05 s | 91 MiB | 0.39 s | 0.95× |
+| 3.13t | **threads** | **2** | **2.88 s** | 2.68–3.02 | 4.46 s | 99 MiB | 0.43 s | **1.35×** |
+| 3.13t | threads | 4 | 2.97 s | 2.72–3.12 | 4.50 s | 113 MiB | 0.50 s | 1.31× |
+| 3.13t | threads | 8 | 3.24 s | 2.92–3.28 | 4.66 s | 136 MiB | 0.46 s | 1.20× |
+
+![Прискорення індексації залежно від кількості воркерів](docs/lab05/speedup.png)
+
+Сирі числа — `docs/lab05/parallel.json`. Для 3.13t `sys._is_gil_enabled()` = **False**
+(перевірено в дочірньому процесі після імпорту findex, typer і rich — жоден C-модуль не
+ввімкнув GIL назад).
+
+**Що перетинає межу процесу** (`parallel.json` → `ipc`, 8 шматків): шляхи до файлів —
+26 KiB туди; часткові індекси — 6.5 MiB назад (`pickle.dumps` усіх частин 153 мс,
+`loads` 77 мс). Якби воркерам віддавали тексти, туди пішло б 12.9 MiB.
+
+**Пам'ять процесів.** У таблиці — RSS лише батька. Кожен spawn-воркер — окремий
+інтерпретатор з піком ≈ 40 MiB (`RUSAGE_CHILDREN`), тож загальний слід для processes × 2
+≈ 96 + 2 × 40 ≈ 176 MiB, для × 8 — ≈ 114 + 8 × 39 ≈ 430 MiB. Потоки 3.13t × 8 — 136 MiB
+на все.
+
+**I/O-bound для порівняння** (`--io 10`: кожен із 560 файлів «завантажується» з затримкою
+10 мс через `time.sleep`, потоки на звичайному 3.13 з GIL):
+
+| Потоків | Wall | Speedup |
+|---:|---:|---:|
+| 1 | 5.75 s | 1.0× |
+| 2 | 2.87 s | 2.0× |
+| 4 | 1.44 s | 4.0× |
+| 8 | 0.72 s | 8.0× |
+| 16 | 0.36 s | 15.8× |
+| 32 | 0.19 s | 30.3× |
+
+Ті самі потоки, той самий GIL — і майже лінійне прискорення далеко за межу двох ядер.
+
+### Гонка на спільному `Counter` (`python -m findex.race data/`)
+
+`findex.parallel` спільного стану не має: кожен `build_partial` пише лише у власні словники,
+а зводить їх один `merge` у батьківському потоці. Щоб побачити, що було б інакше, `race.py`
+рахує 1 808 119 токенів корпусу чотирма потоками в **один спільний** `Counter`:
+
+```text
+$ python -m findex.race --dis          # тіло counts[key] += 1
+LOAD_FAST_LOAD_FAST  (counts, key)
+COPY 2 / COPY 2
+BINARY_SUBSCR        ← прочитати старе значення
+LOAD_CONST 1
+BINARY_OP 13 (+=)    ← додати
+SWAP 3 / SWAP 2
+STORE_SUBSCR         ← записати назад
+```
+
+| Збірка | Режим | Втрачені оновлення за 5 раундів | Wall (медіана) |
+|---|---|---|---:|
+| 3.13, GIL | racy | 0, 0, 0, 0, 0 (у попередньому прогоні 0, 0, 0, 1, 4) | 0.52 s |
+| 3.13, GIL | lock | 0 | 0.95 s |
+| 3.13, GIL | no-sharing | 0 | 0.30 s |
+| 3.13t | racy | **17 850, 22 234, 14 775, 22 141, 21 356** | 1.00 s |
+| 3.13t | lock | 0 | 2.24 s |
+| 3.13t | no-sharing | 0 | 0.23 s |
+
+**Гонка.** `+=` — це три окремі кроки: прочитати, додати, записати. Два потоки читають 7,
+обидва пишуть 8 — одне оновлення зникає. З GIL перемикання між потоками трапляється лише
+на перевірках інтерпретатора, тож вікно між `BINARY_SUBSCR` і `STORE_SUBSCR` рідко
+розривається, **але не ніколи** (1 і 4 втрати в одному з прогонів): код був неправильним і
+до 3.13t. Без GIL потоки справді виконують цей рядок одночасно на двох ядрах, і втрачається
+≈ 1 % оновлень у кожному раунді. **Виправлення:** `threading.Lock` навколо `+=` (коректно,
+але вдвічі повільніше за гонку й у 10 разів повільніше за no-sharing на 3.13t — потоки
+стоять у черзі за замком) або, краще, **не ділити стан**: кожен потік рахує у свій
+`Counter`, а зливає їх один потік після завершення. Саме так улаштовано `build_partial` +
+`merge`, тому індекс коректний на обох збірках без жодного замка.
+
+### GIL: що я побачив і чому
+
+**Чому потоки під GIL не прискорили індексацію.** Токенізація, `Counter` і заповнення
+масивів — чистий Python-код, а виконувати байткод у процесі одночасно може лише потік, що
+тримає GIL. Тому скільки б потоків не було, у кожен момент працює одне ядро: CPU ≈ wall
+(4.20 с CPU при 4.23 с wall для двох потоків), а на двоядерній машині друге ядро простоює.
+Стає навіть гірше, ніж послідовно (0.94× → 0.85×): потоки щоп'ять мілісекунд
+передають GIL один одному, шматків більше, а всі часткові індекси одночасно живуть в одному
+процесі (RSS 88 → 121 MiB). GIL відпускається на I/O і `sleep`, тому в I/O-експерименті
+ті самі потоки дали 8× на восьми потоках: вони здебільшого чекають, а не рахують.
+
+**Чому процеси прискорили і чого це коштувало.** У кожного процесу свій інтерпретатор і
+свій GIL, тож два воркери справді рахують на двох ядрах: 3.89 → 2.82 с (1.38×). Ціна видна
+в стовпчиках: **CPU-час більший за wall і більший за послідовний** (4.63 с CPU на 2.82 с
+wall; 6.17 с при восьми воркерах) — кожен воркер окремо запускає інтерпретатор і імпортує
+findex (≈ 0.15 с), частини пікляться у воркері й розпіклюються в батьку (≈ 0.23 с), а
+злиття більшої кількості частин дорожче. Звідси й те, що processes × 1 повільніший за serial
+(0.86×): усі накладні витрати є, а паралелізму немає. **Пам'ять:** батько ≈ 96 MiB, плюс
+≈ 40 MiB на кожен воркер, тобто × 8 займає майже вшестеро більше, ніж послідовна збірка (≈ 430 проти 75 MiB). Більше
+воркерів, ніж ядер (4, 8), тільки погіршує: ядер не додається, а запусків інтерпретатора і
+частин для злиття — більше.
+
+**Амдал і merge.** `merge` завжди послідовний: 0.33 с з 3.89 с — це ≈ 8.5 % роботи, тож
+навіть на нескінченній кількості ядер індексація пришвидшилась би щонайбільше в
+1 / 0.085 ≈ 12 разів, а на двох ядрах — у 1 / (0.085 + 0.915 / 2) ≈ 1.84 раза. До
+послідовної частини додаються запуск воркерів і розпіклювання частин у батьку (≈ 0.2 с),
+тому реальні 1.38× близькі до того, що дозволяють Амдал і накладні витрати, а не до
+ідеальних 2×. Час merge росте з кількістю частин (0.20 с для однієї → 0.27–0.50 с для
+4–32), тож дрібніше розбиття збільшує саме ту частку, яку не розпаралелиш.
+
+**Що змінилося на 3.13t.** Без GIL **ті самі потоки** раптом масштабуються: 2.88 с на двох
+потоках (1.35×) — майже як процеси (2.82 с), але без запуску інтерпретаторів і без pickle:
+часткові індекси лишаються в спільній пам'яті, а загальний слід × 8 — 136 MiB проти
+≈ 430 MiB у процесів. Однопотокова ціна free-threading тут мала: serial 3.96 с проти 3.89 с
+(≈ 2 %). Зате вилізла гонка, яку GIL ховав: спільний `Counter` без замка губить ≈ 20 000
+оновлень за раунд. Наш індекс від неї не страждає лише тому, що `build_partial` нічого не
+ділить.
+
+**Рішення.** На звичайному CPython (з GIL) для CPU-bound індексації виграють процеси, тому
+**`--executor processes` — значення за замовчуванням**, а `--workers` за замовчуванням
+дорівнює `os.cpu_count()`: на цій машині саме 2 воркери дали найкращий результат, а
+більше за кількість ядер — гірший. Потоки варто обирати для I/O (завантаження сторінок у
+Lab 6) або на free-threaded збірці. JSON-lines корпус не можна поділити за файлами, тому
+для нього CLI попереджає і будує послідовно.
