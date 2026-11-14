@@ -22,3 +22,7 @@ data/
 .pytest_cache/
 .ruff_cache/
 .venv-ft/
+
+# crawler output (Lab 6): pages and per-URL logs are data, not sources
+crawl.log
+docs/lab06/runs/

@@ -6,7 +6,8 @@
 [Python — Build a Search Engine](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/README.md).
 Кожна лабораторна додає один крок; стан після кожної позначено git-тегом (`lab-01`, `lab-02`, …).
 З лаби 4 це встановлюваний пакет з командою `findex` (реліз `v0.4.0`); з лаби 5 індекс
-будується паралельно (`--executor processes`, за замовчуванням).
+будується паралельно (`--executor processes`, за замовчуванням); з лаби 6 корпус можна
+зібрати асинхронним краулером (`findex crawl`).
 
 ## Встановлення
 
@@ -42,6 +43,8 @@ findex --help
 ## Запуск
 
 ```bash
+findex crawl https://books.toscrape.com/ --max-pages 200   # Lab 6: сторінки → data/crawl.jsonl
+findex index data/crawl.jsonl -o crawl.pkl --positions # зібране індексується вже поза циклом подій
 findex index data/ --out index.pkl --positions        # індекс (смуга прогресу rich)
 findex index data/ -o index.pkl --executor threads -j 4   # Lab 5: serial | threads | processes
 findex search index.pkl 'python AND (async OR await) NOT java "event loop"'
@@ -51,7 +54,7 @@ findex -vv search index.pkl "dict hash"                # DEBUG: @timed і кеш
 
 # розробка
 uv sync                                                # проєкт + dev-інструменти з uv.lock
-uv run pytest                                          # 163 тести; -m "not slow" — швидко
+uv run pytest                                          # 205 тестів; -m "not slow" — швидко
 uv run pytest --cov                                    # покриття
 uv run pyright && uv run ruff check . && uv run ruff format --check .
 
@@ -65,6 +68,9 @@ uv run python -m findex.evaluate index.pkl eval/queries.json   # Lab 3: precisio
 uv run python -m findex.bench_parallel data/ --ft .venv-ft/bin/python   # Lab 5: таблиця + графік
 uv run python -m findex.bench_parallel data/ --io 10   # Lab 5: I/O-bound для порівняння
 uv run python -m findex.race data/                     # Lab 5: гонка на спільному Counter
+./scripts/build_mirror.sh                              # Lab 6: локальне дзеркало docs.python.org
+uv run python -m findex.crawler.mirror data/mirror --port 8000  # Lab 6: сервер із затримкою і збоями
+uv run python -m findex.crawler.bench data/mirror      # Lab 6: таблиця concurrency 1 / 5 / 20
 ```
 
 Розділи лаб 2–3 нижче показують команди тих версій (`python -m findex.index`,
@@ -93,9 +99,25 @@ src/findex/
   timing.py    @timed (functools.wraps, ParamSpec)
   stats.py, bench.py, bench_index.py, bench_search.py, sanity.py, evaluate.py — дослідницькі скрипти
   bench_parallel.py, race.py — дослідницькі скрипти Lab 5 (таблиця, графік, гонка)
+  crawler/                                                                      # Lab 6
+    fetch.py    fetch(): asyncio.timeout, повтори 429/5xx/таймаут з backoff + jitter, Retry-After
+    robots.py   RobotsCache: robots.txt один раз на хост, Crawl-delay
+    urls.py     canonicalize(), allowlist доменів
+    extract.py  заголовок, текст і посилання (selectolax)
+    crawl.py    crawl(): асинхронний генератор, Queue + TaskGroup, семафори, пауза на хост
+    run.py      crawl_to_jsonl(): сторінка → рядок JSON одразу, як прийшла
+    mirror.py   локальний сервер-дзеркало із затримкою, robots.txt і навмисними збоями
+    bench.py    бенчмарк concurrency 1 / 5 / 20 і порівняння з підходом Lab 5
+    inline_demo.py  експеримент: індексація всередині циклу подій і що бачить debug-режим
 docs/lab05/
   parallel.json  сирі результати бенчмарку (усі медіани, min..max, машина, IPC)
   speedup.png    графік прискорення
+docs/lab06/
+  crawl_bench.json  сирі результати бенчмарку краулера
+  failures.log      рядки crawl.log з обробленими збоями
+scripts/
+  get_corpus.sh     корпус .rst (лаби 1–5)
+  build_mirror.sh   HTML-дзеркало docs.python.org для краулера (Lab 6)
 eval/
   queries.json 10 запитів з ручною розміткою релевантних документів
 tests/
@@ -104,6 +126,7 @@ tests/
   test_cli.py       findex через typer.testing.CliRunner: вивід, --json, -vv, помилки  # Lab 4
   test_properties.py  5 властивостей Hypothesis                                # Lab 4
   test_parallel.py  serial merge == Lab 4, усі executors однакові, падіння воркера, spawn  # Lab 5
+  test_crawler.py   fetch/robots/crawl через httpx.MockTransport, CLI проти локального дзеркала # Lab 6
   test_tokenize.py, test_corpus.py, test_index.py, test_model.py, test_query.py, test_rank.py
 ```
 
@@ -679,6 +702,8 @@ TOTAL                     1169     42    326     31    95%
 ```
 findex [-v|-vv] index  CORPUS --out FILE [--positions] [--limit N] [--layout …] [--format …]
                        [--executor serial|threads|processes] [-j|--workers N]
+findex crawl SEED_URL... [--max-pages 500] [-c|--concurrency 10] [--per-host 2] [--delay 0.5]
+                       [-o data/crawl.jsonl] [--log crawl.log] [--allow-domain D] [--debug]
 findex [-v|-vv] search INDEX "QUERY" [-k 10] [--scorer bm25|tfidf] [--json] [--engine merge|set]
 findex [-v|-vv] stats  INDEX [--top 20] [--json]
 ```
@@ -945,3 +970,279 @@ findex (≈ 0.15 с), частини пікляться у воркері й р�
 більше за кількість ядер — гірший. Потоки варто обирати для I/O (завантаження сторінок у
 Lab 6) або на free-threaded збірці. JSON-lines корпус не можна поділити за файлами, тому
 для нього CLI попереджає і будує послідовно.
+
+## Lab 6: асинхронний краулер (`findex crawl`)
+
+### Звідки дозвіл
+
+* **Заміри й бенчмарк — проти власного локального дзеркала docs.python.org.**
+  `scripts/build_mirror.sh` збирає HTML із тих самих джерел CPython `Doc/`, що й справжній
+  сайт (Sphinx, конфігурація проєкту CPython), а `python -m findex.crawler.mirror` роздає його
+  на `127.0.0.1`. Сервер мій, документація поширюється під ліцензією PSF, а сотні запитів
+  кожного прогону бенчмарку не навантажують нічий чужий сервер. Дзеркало навмисно поводиться
+  як справжній сервер в інтернеті: затримка 80 ± 40 мс на відповідь, `robots.txt`, збої (нижче).
+* **Живий сайт для демонстрації** — [books.toscrape.com](https://books.toscrape.com/).
+  Сайт створено для тренувань зі скрапінгу: на [toscrape.com](https://toscrape.com) він
+  описаний як «a fictional bookstore that desperately wants to be scraped» і «a safe place
+  for beginners learning web scraping».
+* **На будь-якому сайті** краулер читає й виконує `robots.txt` (зокрема `Crawl-delay`),
+  представляється чесним User-Agent з адресою для зв'язку
+  `findex/0.4.0 (student search-engine crawler; +https://github.com/Giovann1g/findex)`,
+  не виходить за домени початкових адрес, тримає не більше 2 запитів одночасно до одного хоста
+  з паузою 0.5 с між ними (типові значення) і зупиняється на `--max-pages` (500).
+
+### Запуск
+
+```bash
+uv sync
+# живий сайт (типові ввічливі ліміти: 2 запити на хост, пауза 0.5 с)
+uv run findex crawl https://books.toscrape.com/ --max-pages 200
+# або власне дзеркало: ./scripts/build_mirror.sh один раз (або HTML-архів з
+# https://docs.python.org/3/download.html, розпакований у data/mirror), потім у двох терміналах:
+uv run python -m findex.crawler.mirror data/mirror --port 8000
+uv run findex crawl http://127.0.0.1:8000/ --max-pages 300 -c 20 --per-host 20 --delay 0 --debug
+# зібране — в індекс і пошук, уже поза циклом подій
+uv run findex index data/crawl.jsonl -o crawl.pkl --positions
+uv run findex search crawl.pkl '"event loop" AND cancel' -k 5
+```
+
+### Як це влаштовано
+
+```
+frontier: asyncio.Queue[(url, depth)]          seen: set[канонічна адреса]
+      │ get                         ▲ put нових посилань (не seen, свій домен, не картинка)
+      ▼                             │
+┌─ TaskGroup (окрема задача) ───────────────────────────────────────┐
+│ воркер × concurrency:                                             │
+│   await robots.allowed(url)            RobotsCache, 1 раз на хост │
+│   await claim()                        бюджет max_pages           │
+│   async with host_sem[host]:           ≤ per_host до одного хоста │
+│     async with global_sem:             ≤ concurrency усього       │
+│       await пауза хоста                ≥ delay між запитами       │
+│       await fetch(url)                 timeout, повтори, backoff  │
+│   extract(html) → посилання у frontier, Page → results            │
+│ drained: await frontier.join(); скасувати вільних воркерів        │
+└───────────────────────────────────────────────────────────────────┘
+      │ results: asyncio.Queue[Page] (обмежена: зворотний тиск)
+      ▼
+async for page in crawl(...): рядок JSON у data/crawl.jsonl, одразу
+```
+
+* **`fetch`** (`crawler/fetch.py`): кожна спроба під `asyncio.timeout`. Повтор — лише для
+  429, 5xx і таймауту, щонайбільше 3 рази, з паузою `min(cap, 0.5·2^n) + U(0, 0.5)`
+  (exponential backoff з jitter). `Retry-After` (секунди або HTTP-дата) замінює паузу, якщо
+  просить довше; понад 60 с краулер здається, а не спить годину. Інші 4xx, зациклені
+  редиректи (`TooManyRedirects`) і відмова з'єднання — остаточні одразу. Тіло читається
+  потоком і лише для тексту, до 5 МіБ. Результат — `FetchResult(status, bytes, elapsed,
+  attempts, error)`.
+* **`RobotsCache`** завантажує `robots.txt` один раз на хост: поки одна корутина його
+  читає, інші чекають на `asyncio.Lock`. Відповідь 4xx означає «можна все», 5xx або таймаут —
+  «нічого не можна» (правила Google). `Crawl-delay` подовжує паузу для хоста.
+* **Канонізація** (`crawler/urls.py`): схема й хост у нижньому регістрі, порт за
+  замовчуванням прибрано, `#фрагмент` відкинуто, `.`/`..` розкрито, кінцевий `/` прибрано,
+  параметри query відсортовано. Ключ у `seen` — канонічна форма, а відносні посилання
+  розкриваються від справжньої адреси сторінки після редиректів. Тест перевіряє, що
+  `/a`, `/a/`, `/a#top`, `?y=2&x=1` і `HTTPS://SITE.ORG/c` завантажуються рівно один раз.
+* **429 гальмує весь хост**: перед повтором `fetch` повідомляє краулер (`on_retry`), і жоден
+  воркер не почне новий запит до цього хоста раніше, ніж сервер дозволив.
+* **Бюджет `max_pages`** покриває і вже віддані сторінки, і запити, що летять. Тому
+  краулер не завантажує сторінок, які потім викине (тест: 25 сторінок — рівно 25 запитів).
+* **Чиста зупинка.** На `max_pages`, коли frontier порожній, на `break` у споживача або
+  на помилці генератор скасовує задачу з TaskGroup. Група скасовує й чекає всіх воркерів,
+  потім закривається `httpx.AsyncClient`. Тест перевіряє, що після виходу не лишається
+  жодної задачі (`asyncio.all_tasks()`).
+* **Чому TaskGroup в окремій задачі, а не навколо `yield`.** Перша версія робила `yield`
+  прямо всередині `async with TaskGroup()`. Тест «споживач вийшов з `async for` після
+  першої сторінки» впав із `BaseExceptionGroup(GeneratorExit)`: генератор, що завис на
+  `yield` всередині TaskGroup, не можна коректно закрити чи скасувати (PEP 789). Тепер
+  воркери живуть у TaskGroup всередині задачі, якою володіє генератор і яку він завжди
+  дочікується у `finally`.
+* **Помилка на одній сторінці не зупиняє обхід**: воркер ловить `Exception` (але не
+  `CancelledError` — це `BaseException`), пише трасу в лог і бере наступну адресу.
+
+**`findex crawl`** пише кожну сторінку в JSONL (`{"id": url, "title", "text", "url",
+"fetched_at", "status", "depth"}`) одразу, як вона прийшла, і нічого не накопичує.
+`iter_documents` з лаби 1 читає цей файл (поле `title` тепер теж). `findex index` індексує
+його окремою командою, поза циклом подій, а `findex search` бере сніпети прямо з JSONL.
+На екрані `rich.Live` перемальовує лічильники зі свого потоку; `crawl.log` зберігає
+результат кожного URL:
+
+```text
+$ findex crawl http://127.0.0.1:8000/ --max-pages 300 -c 20 --per-host 20 --delay 0 --timeout 5 --debug
+findex crawl · http://127.0.0.1:8000/
+pages             300 / 300
+pages/s                23.0
+in flight                 0
+queue                   196
+errors      1  (retries 14)
+robots.txt        3 blocked
+elapsed              13.1 s
+wrote crawl.jsonl: 300 pages in 13.1 s (23.0 pages/s), 301 requests, 1 errors, 14 retries; log: crawl.log
+asyncio debug mode: 0 callbacks blocked the loop for > 100 ms
+next: findex index crawl.jsonl -o crawl.pkl --positions
+
+$ findex index crawl.jsonl -o crawl.pkl --positions
+wrote crawl.pkl (pickle, 8.5 MiB): 300 documents, 35,569 terms, with positions
+$ findex search crawl.pkl '"event loop" AND cancel' -k 3
+ # │  score │ document                         │ snippet
+ 1 │ 11.931 │ Runners — Python 3.16.0a2 …      │ … This function cannot be called when another asyncio event loop is running …
+ 2 │ 11.137 │ Event loop — Python 3.16.0a2 …   │ … to be called with args arguments at the next iteration of the event loop …
+ 3 │ 10.693 │ Tkinter dialogs — Python 3.16.0a2 … │ … Render dialog and start event loop. ok_event ( event ) …
+```
+
+`--debug` запускає `asyncio.run(..., debug=True)` і рахує повідомлення asyncio про колбеки,
+що тримали цикл довше за 100 мс: **0**.
+
+### Бенчмарк
+
+`python -m findex.crawler.bench data/mirror`. Та сама машина, що й у лабі 5: Intel(R) Xeon(R)
+Processor @ 2.10GHz, 2 ядра, Linux, Python 3.13. Початкова адреса — корінь дзеркала,
+`max_pages` = 300, `--timeout 5`. Кожен прогін — **свіжий процес краулера і свіже дзеркало**
+(тож кожен прогін зустрічає ті самі збої), по 3 прогони на рядок, у таблиці медіана.
+Збої дзеркала вибираються за хешем шляху: 2 % сторінок відповідають на перший запит `429` +
+`Retry-After: 1`, 2 % — `503`, 1 % зависають на 8 с, а головна сторінка має посилання на
+петлю редиректів. Сирі числа — `docs/lab06/crawl_bench.json`.
+
+| Прогін | Сторінок | Wall (медіана) | Розкид | Сторінок/с | Помилки | Повтори | CPU | Peak RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| asyncio, concurrency 1 | 300 | 59.08 s | 58.63–59.15 | 5.1 | 1 | 11 | 2.93 s | 59 MiB |
+| asyncio, concurrency 5 | 300 | 17.19 s | 16.62–17.47 | 17.5 | 1 | 11 | 2.95 s | 59 MiB |
+| **asyncio, concurrency 20** | 300 | **12.43 s** | 8.94–12.72 | **24.1** | 1 | 14 | 2.74 s | 61 MiB |
+| asyncio 20, per-host 2 | 300 | 32.28 s | 32.13–32.91 | 9.3 | 1 | 11 | 2.92 s | 59 MiB |
+| asyncio 20, per-host 2, пауза 0.25 s | 300 | 82.30 s | 82.02–82.63 | 3.6 | 1 | 11 | 3.13 s | 59 MiB |
+
+У перших трьох рядках ліміт на хост дорівнює concurrency, а паузи немає: дзеркало моє, і
+ці рядки міряють сам механізм. Два нижні рядки показують ціну ввічливості. Єдина помилка в
+кожному рядку — петля редиректів; усі 429, 503 і таймаути відновились повтором.
+
+**Ті самі 300 адрес, збої вимкнено** (список — те, що зібрав прогін з concurrency 20):
+
+| Як завантажуємо | Wall (медіана) | Сторінок/с | CPU | Peak RSS |
+|---|---:|---:|---:|---:|
+| asyncio, 20 одночасно, один потік | **1.96 s** | **152.8** | 1.39 s | 84 MiB |
+| Lab 5: процеси × 2 (по ядру), кожен по черзі | 16.09 s | 18.6 | 1.63 s | 32 MiB (лише батько; + ≈ 40 MiB на воркер) |
+| 20 потоків, блокувальний `httpx.Client` | 2.14 s | 140.4 | 1.79 s | 256 MiB |
+
+**Знахідка по дорозі.** Спершу asyncio на цьому списку йшов 1.3 с замість 0.25 с, а
+окремі запити — рівно по 1.1 с. Причина була в дзеркалі: `ThreadingHTTPServer` слухає з
+backlog 5. Двадцять одночасних `connect()` переповнювали чергу, і ядро повторювало SYN через
+секунду. Після `request_queue_size = 128` (як у справжніх серверів) затримка зникла. Потоки
+цього не помічали, бо стартують з невеликим розкидом і не б'ють сервер усі в одну мить.
+
+### Чому 20 одночасних запитів в одному потоці швидші за підхід лаби 5
+
+Лаба 5 прискорювала роботу, обмежену процесором: токенізацію ділили між ядрами, і
+стелею була кількість ядер (2). Краулер майже весь час **чекає**. На однаковому списку
+300 сторінок CPU-часу потрібно 1.4–1.8 с за будь-якого підходу, а мережа на кожну сторінку
+забирає 80 ± 40 мс очікування. Два процеси лаби 5 — це лише два запити в польоті, тож
+300 × 0.1 с / 2 ≈ 15 с (виміряно 16.09 с). Один потік з asyncio тримає 20 запитів у польоті:
+поки 19 корутин чекають на сокети, цикл подій розбирає відповідь двадцятої. Виходить
+1.96 с — у 8.2 раза швидше, на одному ядрі й без копій інтерпретатора.
+
+Від concurrency 1 до 5 час падає в 3.4 раза (59.1 → 17.2 с), до 20 — у 4.8 раза (12.4 с).
+Не в 20, бо далі впираємося не в мережу, а у збої. Кожна з 11–14 відповідей 429 чи 503 зупиняє
+**весь хост** на 0.5–1 с, а три «зависання» тримають воркер 5 с до таймауту. Без збоїв
+20 запитів у польоті дають 1.96 с. CPU у всіх асинхронних рядках однаковий (≈ 2.9 с, з них
+≈ 0.1 с — імпорти): роботу робить той самий один потік, змінюється лише те, скільки чекань
+перекривається. Пам'ять теж не росте з concurrency (59–61 MiB), бо сторінки йдуть у файл
+одразу. 20 потоків майже такі ж швидкі (2.14 с), бо GIL відпускається на сокетах, але
+займають 256 MiB проти 84 MiB і не мають ні `TaskGroup`, ні скасування, ні таймауту на всю
+операцію. На тисячах з'єднань потік на запит стає надто дорогим.
+
+### Чого коштує ліміт на хост і навіщо він лишився
+
+На одному хості ліміт `--per-host 2` перетворює concurrency 20 на 2: 32.3 с замість 12.4 с
+(у 2.6 раза повільніше). Пауза 0.25 с між запитами ставить нижню межу 300 × 0.25 = 75 с, і
+виходить 82.3 с — у 6.6 раза повільніше. За замовчуванням стоїть `--per-host 2 --delay 0.5`,
+бо 20 одночасних з'єднань — це навантаження двадцяти користувачів на чужий сервер. Саме від
+такого краулера сервер відповідає 429 або блокує IP. Глобальний семафор обмежує нас самих
+(сокети, пам'ять), а семафор на хост — навантаження на кожен окремий сервер. Коли хостів
+багато, краулер усе одно швидкий: 20 запитів у польоті розходяться по різних серверах.
+Високий `--per-host` і `--delay 0` я ставлю тільки для власного дзеркала.
+
+### Де зупинився б цикл подій, якби індексація йшла в корутині
+
+У корутинах краулера з процесорної роботи лишились тільки розбір HTML і запис рядка у файл.
+selectolax розбирає типову сторінку документації (174 КіБ) за 5.7 мс проти 17 мс у
+`html.parser`; найбільшу (`genindex-all`, 2 МіБ) — за 56 мс проти 158 мс, тобто
+`html.parser` сам перевищив би поріг debug-режиму в 100 мс. Звідси вибір selectolax, а
+`genindex` до того ж заборонено в `robots.txt` дзеркала. Токенізація ж, якби її робити в
+корутині, займає на сторінку 3.9 мс (медіана), 27 мс (p95) і 64 мс (`tkinter.html`), разом
+**2.3 с CPU на 300 сторінок**. Це більше, ніж увесь обхід на concurrency 20 (1.96 с без
+збоїв), і весь цей час 20 сокетів ніхто не обслуговує. Побудова індексу й pickle наприкінці
+всередині корутини — один блок на 2.8 с, і debug-режим його ловить
+(`python -m findex.crawler.inline_demo URL inline|stream`, 300 сторінок, concurrency 20):
+
+```text
+$ python -m findex.crawler.inline_demo http://127.0.0.1:8000/ inline   # build_index + pickle у корутині
+inline: crawl 3.11 s, index inside the loop 2.77 s
+asyncio WARNING Executing <Task finished name='Task-1' coro=<run() done, …> took 2.770 seconds
+$ python -m findex.crawler.inline_demo http://127.0.0.1:8000/ stream   # як у findex crawl
+stream: crawl 3.57 s, index inside the loop 0.00 s
+```
+
+(У debug-режимі сам обхід повільніший — 3.1–3.6 с проти 1.96 с, бо asyncio перевіряє
+кожен колбек.)
+
+Тому `findex crawl` лише пише JSONL, а `findex index` запускається окремо. Якби індексувати
+довелося під час обходу, роботу треба було б віддати `ProcessPoolExecutor` через
+`loop.run_in_executor` (за підходом лаби 5), а не робити її в корутині.
+
+### Оброблений збій (рядки з `crawl.log`, повніше — `docs/lab06/failures.log`)
+
+```text
+INFO    retry 1/3 http://127.0.0.1:51733/glossary.html in 1.00 s: HTTP 429 (Retry-After: 1)
+INFO    200 http://127.0.0.1:51733/glossary.html 213472 B 1.21 s (2 attempts) 'Glossary — …', 823 links
+INFO    retry 1/3 http://127.0.0.1:51733/library/asyncio-graph.html in 0.55 s: HTTP 503
+INFO    200 http://127.0.0.1:51733/library/asyncio-graph.html 33466 B 0.72 s (2 attempts) …
+INFO    retry 1/3 http://127.0.0.1:51733/library/struct.html in 0.62 s: timeout after 5 s
+INFO    200 http://127.0.0.1:51733/library/struct.html 82099 B 5.70 s (2 attempts) …
+WARNING   0 http://127.0.0.1:51733/loop/a 0 B 0.40 s: redirect loop (too many redirects)
+INFO    robots  http://127.0.0.1:51733/genindex.html: disallowed by robots.txt
+```
+
+* **429**: сервер попросив `Retry-After: 1`. Розрахований backoff був 0.5 с + jitter, тож
+  перемогли серверні 1.00 с. Друга спроба вдалася, і на цю секунду весь хост пригальмовано.
+* **503** без `Retry-After`: чекали за формулою 0.5 с + jitter (0.55 с), друга спроба — 200.
+* **Таймаут**: сторінка «зависла» на 8 с, `asyncio.timeout(5)` скасував спробу, повтор за
+  0.62 с вдався (5.70 с разом).
+* **Петля редиректів** `/loop/a → /loop/b → /loop/a …`: `httpx` зупинився після 5
+  редиректів. Помилку записано і не повторювано, бо повтор дав би ту саму петлю.
+
+### Reflection: коротко
+
+1. **Цикл подій і `await` на сокеті.** Корутина доходить до читання сокета, в якому ще
+   немає даних, і віддає керування. Цикл реєструє сокет у `epoll`/`kqueue` і запускає
+   наступну готову задачу. Коли ядро повідомляє, що сокет готовий до читання, цикл знову
+   ставить задачу в чергу готових, і вона продовжується з того самого `await`.
+2. **Кооперативна і витісняльна багатозадачність.** Кооперативна: перемикання відбуваються
+   лише на `await`, тож між ними гонок немає. Небезпека в тому, що одна корутина без `await`
+   зупиняє всіх. Витісняльна (потоки): ОС перемикає сама, тож один повільний потік не зупинить
+   інших, але перемикання може статися посеред `x += 1`. Замок в asyncio знову потрібен, коли
+   оновлення з кількох кроків має `await` посередині. У краулері такі місця побудовано без
+   `await` усередині, наприклад, слот паузи хоста резервується до `sleep`.
+3. **`time.sleep(1)` у корутині** зупиняє цикл на секунду: решта 19 воркерів стоять, їхні
+   таймери й сокети не обслуговуються. Виправлення — `await asyncio.sleep(1)`: воно віддає
+   керування циклу, а прокинутися просить таймером.
+4. **`async def` і генератори.** Виклик `fetch(url)` створює об'єкт корутини і нічого не
+   виконує, так само як виклик генераторної функції в лабі 1 лише створює генератор. `await`
+   проганяє корутину до наступної точки призупинення, як `next()` проганяє генератор до `yield`.
+5. **`TaskGroup` чи `gather`.** Коли одна задача групи падає, `TaskGroup` скасовує інші,
+   чекає на них і піднімає `ExceptionGroup` з усіма помилками. `gather` за замовчуванням
+   повертає першу помилку, а решта задач продовжує працювати без власника. `ExceptionGroup`
+   — це кілька винятків в одному, їх розбирають через `except*`.
+6. **Чому лаба 5 не прискорилась потоками, а краулер прискорився.** Індексація з лаби 5
+   рахує на процесорі, а GIL дає одночасно рахувати лише одному потоку. Краулер чекає, і на
+   очікуванні GIL не потрібен: 20 чекань перекриваються в одному потоці. Таблиця вище це
+   показує: CPU однаковий, wall у 8 разів менший.
+7. **`CancelledError` — `BaseException`**, щоб звичайний `except Exception:` навколо `await`
+   його не ковтав. Якби ковтав, скасування (таймаут, вихід з TaskGroup, Ctrl-C) не доходило
+   б до задачі, і вона продовжувала б працювати. Тому воркер ловить лише `Exception`.
+8. **Семафор на хост і глобальний.** Глобальний обмежує наш власний ресурс: сокети і
+   пам'ять. Семафор на хост обмежує навантаження на один сервер. Потрібні обидва: перший без
+   другого завалює один сервер, другий без першого відкриває тисячі з'єднань до тисячі
+   хостів. `Retry-After` замінює розрахований backoff, якщо просить довше, і зсуває момент,
+   коли можна звертатися до **всього хоста**, а не лише повтор однієї адреси.
+9. **Процесорна робота під час обходу** — в `ProcessPoolExecutor` через
+   `loop.run_in_executor`, а блокувальний I/O — в `asyncio.to_thread`. У findex простіше:
+   обхід пише JSONL, а `findex index` індексує окремо.

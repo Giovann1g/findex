@@ -332,7 +332,8 @@ def build_index(
                 else:
                     plain[term].append(PlainPosting(doc_id, tf))
         fallback = Path(doc.doc_id).stem
-        doc_meta[doc_id] = DocMeta(doc_id, doc.doc_id, guess_title(doc.text, fallback))
+        title = doc.title or guess_title(doc.text, fallback)
+        doc_meta[doc_id] = DocMeta(doc_id, doc.doc_id, title)
         if (doc_id + 1) % 100 == 0:
             log.info("indexed %d documents", doc_id + 1)
 

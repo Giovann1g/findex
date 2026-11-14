@@ -9,7 +9,8 @@ Supported inputs
 * a directory tree of text files (``*.txt``, ``*.md``, ``*.rst``, also
   ``*.gz``-compressed variants) — walked lazily with ``Path.rglob``;
 * a single JSON-lines file (``*.jsonl`` or ``*.jsonl.gz``), one document per
-  line: ``{"id": ..., "text": ...}``;
+  line: ``{"id": ..., "text": ..., "title": ...}`` (``title`` optional; this is
+  what ``findex crawl`` writes);
 * a single text file.
 """
 
@@ -31,6 +32,7 @@ class Document(NamedTuple):
     doc_id: str  # stable id: path relative to the corpus root (or JSON "id")
     path: Path
     text: str
+    title: str | None = None  # known title (JSON "title"); else guessed from the text
 
 
 def _is_text_file(path: Path) -> bool:
@@ -72,7 +74,8 @@ def _iter_jsonl(path: Path) -> Iterator[Document]:
                 log.warning("%s:%d: invalid JSON (%s), skipped", path, lineno, exc)
                 continue
             doc_id = str(record.get("id", f"{path.name}:{lineno}"))
-            yield Document(doc_id, path, str(record.get("text", "")))
+            title = record.get("title")
+            yield Document(doc_id, path, str(record.get("text", "")), str(title) if title else None)
 
 
 def iter_documents(root: Path) -> Iterator[Document]:
@@ -137,3 +140,25 @@ def list_document_paths(root: Path) -> tuple[Path, list[Path]]:
         if path.is_file() and _is_text_file(path):
             paths.append(path)
     return root, paths
+
+
+def find_jsonl_text(path: Path, doc_id: str) -> str | None:
+    """The text of document ``doc_id`` in a JSON-lines file, or ``None``.
+
+    One lazy pass; a line is parsed only if it can be the one we want (its raw
+    text contains the id), so a lookup costs a read of the file, not a
+    ``json.loads`` per line. Used for search snippets of crawled pages.
+    """
+    needle = json.dumps(doc_id, ensure_ascii=False)
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if needle not in line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if str(record.get("id")) == doc_id:
+                return str(record.get("text", ""))
+    return None

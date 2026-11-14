@@ -23,7 +23,7 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from findex.corpus import read_text
+from findex.corpus import find_jsonl_text, read_text
 from findex.tokenize import tokenize
 
 if TYPE_CHECKING:
@@ -136,5 +136,9 @@ def document_text(index: Index, doc_id: int, root: str | Path | None = None) -> 
         if not isinstance(stored, str):  # narrowing: meta values are `object`
             return None
         root = stored
-    path = Path(root) / index.doc_meta[doc_id].path
+    root = Path(root)
+    stored_path = index.doc_meta[doc_id].path
+    if root.is_file() and root.name.endswith((".jsonl", ".jsonl.gz")):
+        return find_jsonl_text(root, stored_path)  # crawled pages: the id is the URL
+    path = root / stored_path
     return read_text(path) if path.is_file() else None

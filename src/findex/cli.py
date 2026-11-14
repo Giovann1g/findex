@@ -1,4 +1,4 @@
-"""The ``findex`` command: ``findex index``, ``findex search``, ``findex stats``.
+"""The ``findex`` command: ``findex crawl``, ``index``, ``search``, ``stats``.
 
 Streams: results (the table, ``--json`` lines, the stats) go to **stdout**;
 progress bars, log lines and errors go to **stderr** — so
@@ -14,6 +14,7 @@ one ``error: …`` line and exit with code 1 — never a traceback.
 
 from __future__ import annotations
 
+import asyncio
 import heapq
 import json
 import logging
@@ -26,7 +27,8 @@ from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
-from rich.console import Console
+from rich.console import Console, Group
+from rich.live import Live
 from rich.logging import RichHandler
 from rich.progress import (
     BarColumn,
@@ -40,6 +42,9 @@ from rich.table import Table
 from rich.text import Text
 
 from findex.corpus import Document, count_documents, iter_documents
+from findex.crawler.crawl import CrawlStats
+from findex.crawler.fetch import USER_AGENT
+from findex.crawler.run import crawl_to_jsonl
 from findex.index import Layout, build_index, fmt_bytes
 from findex.merge import ENGINES, EngineName
 from findex.parallel import ExecutorName, build_parallel
@@ -347,3 +352,139 @@ def stats_cmd(
         for i, (t, cf, df) in enumerate(top_terms, start=1):
             terms.add_row(str(i), t, f"{cf:,}", f"{df:,}")
         stdout.print(terms)
+
+
+# --------------------------------------------------------------------------- crawl
+DEFAULT_CRAWL_OUT = Path("data/crawl.jsonl")
+
+
+class _SlowCallbacks(logging.Handler):
+    """Counts asyncio debug-mode reports of a callback that blocked the loop."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.count = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.getMessage().startswith("Executing"):  # "Executing <Task …> took 0.2 s"
+            self.count += 1
+
+
+def _crawl_panel(stats: CrawlStats, max_pages: int) -> Table:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+    table.add_row("pages", f"{stats.pages:,} / {max_pages:,}")
+    table.add_row("pages/s", f"{stats.pages_per_s:.1f}")
+    table.add_row("in flight", f"{stats.in_flight}")
+    table.add_row("queue", f"{stats.queued:,}")
+    table.add_row(
+        "errors", f"{stats.errors}" + (f"  (retries {stats.retries})" if stats.retries else "")
+    )
+    table.add_row("robots.txt", f"{stats.robots_blocked} blocked")
+    table.add_row("elapsed", f"{stats.elapsed:.1f} s")
+    return table
+
+
+@app.command("crawl")
+def crawl_cmd(
+    seeds: Annotated[list[str], typer.Argument(metavar="SEED_URL...", help="Where to start.")],
+    out: Annotated[Path, typer.Option("--out", "-o", help="JSON lines, one page per line.")] = Path(
+        "data/crawl.jsonl"
+    ),
+    max_pages: Annotated[int, typer.Option("--max-pages", min=1, help="Page budget.")] = 500,
+    concurrency: Annotated[
+        int, typer.Option("--concurrency", "-c", min=1, help="Requests in flight, all hosts.")
+    ] = 10,
+    per_host: Annotated[
+        int, typer.Option("--per-host", min=1, help="Requests in flight to one host.")
+    ] = 2,
+    delay: Annotated[
+        float, typer.Option("--delay", min=0.0, help="Minimum seconds between requests to a host.")
+    ] = 0.5,
+    allow_domain: Annotated[
+        list[str] | None,
+        typer.Option("--allow-domain", help="Stay on these domains (default: the seeds')."),
+    ] = None,
+    max_depth: Annotated[
+        int | None, typer.Option("--max-depth", min=0, help="Links to follow from a seed.")
+    ] = None,
+    timeout: Annotated[float, typer.Option(min=0.1, help="Seconds per request attempt.")] = 10.0,
+    log_file: Annotated[Path, typer.Option("--log", help="Per-URL status log.")] = Path(
+        "crawl.log"
+    ),
+    debug: Annotated[
+        bool, typer.Option("--debug", help="asyncio debug mode: report anything blocking the loop.")
+    ] = False,
+) -> None:
+    """Crawl politely from SEED_URL(s), streaming pages to JSON lines for `findex index`."""
+    if out == DEFAULT_CRAWL_OUT:
+        out.parent.mkdir(exist_ok=True)  # data/ is git-ignored, so a fresh clone lacks it
+    if not out.parent.is_dir():
+        fail(f"output directory does not exist: {out.parent}")
+    for seed in seeds:
+        if not seed.startswith(("http://", "https://")):
+            fail(f"not an http(s) URL: {seed}")
+
+    # crawl.log gets every URL's outcome; the screen shows only the counters.
+    file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s"))
+    crawl_log = logging.getLogger("findex.crawl")
+    crawl_log.setLevel(logging.INFO)
+    crawl_log.addHandler(file_handler)
+    crawl_log.propagate = False
+    slow = _SlowCallbacks()
+    aio_log = logging.getLogger("asyncio")
+    aio_log.addHandler(file_handler)
+    aio_log.addHandler(slow)
+    crawl_log.info("user-agent: %s", USER_AGENT)
+    crawl_log.info(
+        "seeds %s, max_pages %d, concurrency %d, per_host %d, delay %.2f s, debug %s",
+        seeds, max_pages, concurrency, per_host, delay, debug,
+    )  # fmt: skip
+
+    stats = CrawlStats()
+    run = crawl_to_jsonl(
+        seeds,
+        out,
+        stats=stats,
+        max_pages=max_pages,
+        concurrency=concurrency,
+        per_host=per_host,
+        min_delay=delay,
+        allowed_domains=allow_domain,
+        max_depth=max_depth,
+        timeout=timeout,
+    )
+    title = Text(f"findex crawl · {', '.join(seeds)}", style="bold")
+    try:
+        # rich redraws from its own thread, reading the counters the loop updates
+        with Live(
+            get_renderable=lambda: Group(title, _crawl_panel(stats, max_pages)),
+            console=stderr,
+            refresh_per_second=8,
+        ):
+            asyncio.run(run, debug=debug)
+        if not stderr.is_terminal:
+            stderr.line()  # the last frame of a non-terminal Live has no newline
+    except KeyboardInterrupt:
+        stderr.print(f"interrupted: {stats.pages:,} pages already in {out}", soft_wrap=True)
+        raise typer.Exit(130) from None
+    finally:
+        for logger in (crawl_log, aio_log):
+            logger.removeHandler(file_handler)
+        aio_log.removeHandler(slow)
+        file_handler.close()
+
+    stderr.print(
+        f"wrote [bold]{out}[/]: {stats.pages:,} pages in {stats.elapsed:.1f} s "
+        f"({stats.pages_per_s:.1f} pages/s), {stats.requests:,} requests, "
+        f"{stats.errors} errors, {stats.retries} retries; log: {log_file}",
+        soft_wrap=True,
+    )
+    if debug:
+        stderr.print(
+            f"asyncio debug mode: {slow.count} callbacks blocked the loop for > 100 ms",
+            soft_wrap=True,
+        )
+    stderr.print(f"next: findex index {out} -o crawl.pkl --positions", soft_wrap=True)

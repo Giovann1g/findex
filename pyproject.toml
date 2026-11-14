@@ -14,7 +14,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "httpx>=0.28.1",
     "rich>=15.0.0",
+    "selectolax>=1.0.2",
     "typer>=0.27.3",
 ]
 
@@ -67,6 +69,8 @@ omit = [
     "*/findex/evaluate.py",
     "*/findex/bench_parallel.py",
     "*/findex/race.py",
+    "*/findex/crawler/bench.py",
+    "*/findex/crawler/inline_demo.py",
     "*/findex/__main__.py",
 ]
 
