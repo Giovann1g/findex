@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Немає такого документа — findex{% endblock %}
+{% block main %}
+<section class="doc">
+  <h1>{% if loading %}Індекс ще завантажується{% else %}Документа №{{ doc_id }} немає{% endif %}</h1>
+  <p class="lead">
+    {% if loading %}Спробуйте оновити сторінку за кілька секунд.{% else %}Можливо, посилання застаріло після перебудови індексу.{% endif %}
+  </p>
+  <p><a href="/{% if q %}?q={{ q|urlencode }}{% endif %}">← до пошуку</a></p>
+</section>
+{% endblock %}

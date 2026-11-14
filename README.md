@@ -5,16 +5,19 @@
 Власна повнотекстова пошукова система, яку я будую протягом семестру в курсі
 [Python — Build a Search Engine](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/README.md).
 Кожна лабораторна додає один крок; стан після кожної позначено git-тегом (`lab-01`, `lab-02`, …).
+
+**Онлайн:** _адреса з'явиться тут після деплою на Render (Lab 7)_ — пошук у браузері, API: `/docs`.
 З лаби 4 це встановлюваний пакет з командою `findex` (реліз `v0.4.0`); з лаби 5 індекс
 будується паралельно (`--executor processes`, за замовчуванням); з лаби 6 корпус можна
-зібрати асинхронним краулером (`findex crawl`).
+зібрати асинхронним краулером (`findex crawl`); з лаби 7 це вебсервіс (`findex serve`, реліз `v0.7.0`).
 
 ## Встановлення
 
 ```bash
 uv tool install .                         # з клону репозиторію: findex з'являється в PATH
-uv tool install https://github.com/Giovann1g/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl
-uv build && uv tool install dist/findex-0.4.0-py3-none-any.whl     # або з локально зібраного wheel
+uv tool install https://github.com/Giovann1g/findex/releases/download/v0.7.0/findex-0.7.0-py3-none-any.whl
+uv build && uv tool install dist/findex-0.7.0-py3-none-any.whl     # або з локально зібраного wheel
+docker build -t findex . && docker run --rm -p 8000:8000 findex  # або контейнер (Lab 7)
 findex --help
 ```
 
@@ -43,6 +46,7 @@ findex --help
 ## Запуск
 
 ```bash
+findex serve --index index.pkl --port 8000             # Lab 7: http://127.0.0.1:8000/ і /docs
 findex crawl https://books.toscrape.com/ --max-pages 200   # Lab 6: сторінки → data/crawl.jsonl
 findex index data/crawl.jsonl -o crawl.pkl --positions # зібране індексується вже поза циклом подій
 findex index data/ --out index.pkl --positions        # індекс (смуга прогресу rich)
@@ -54,7 +58,7 @@ findex -vv search index.pkl "dict hash"                # DEBUG: @timed і кеш
 
 # розробка
 uv sync                                                # проєкт + dev-інструменти з uv.lock
-uv run pytest                                          # 205 тестів; -m "not slow" — швидко
+uv run pytest                                          # 243 тести; -m "not slow" — швидко
 uv run pytest --cov                                    # покриття
 uv run pyright && uv run ruff check . && uv run ruff format --check .
 
@@ -71,6 +75,7 @@ uv run python -m findex.race data/                     # Lab 5: гонка на 
 ./scripts/build_mirror.sh                              # Lab 6: локальне дзеркало docs.python.org
 uv run python -m findex.crawler.mirror data/mirror --port 8000  # Lab 6: сервер із затримкою і збоями
 uv run python -m findex.crawler.bench data/mirror      # Lab 6: таблиця concurrency 1 / 5 / 20
+uv run python -m findex.web.bench index.pkl            # Lab 7: def vs async def, таблиця oha
 ```
 
 Розділи лаб 2–3 нижче показують команди тих версій (`python -m findex.index`,
@@ -82,8 +87,9 @@ uv run python -m findex.crawler.bench data/mirror      # Lab 6: таблиця c
 pyproject.toml   метадані (PEP 621), залежності, група dev, [project.scripts], ruff/pyright/pytest
 uv.lock          точні версії всіх залежностей (комітиться)
 .github/workflows/
-  ci.yml         push і PR: uv sync, ruff, ruff format, pyright, pytest + перевірка wheel
+  ci.yml         push і PR: uv sync, ruff, ruff format, pyright, pytest + перевірка wheel; docker build + /health
   release.yml    тег v*: uv build і wheel + sdist у GitHub Release
+  loadtest.yml   вручну (Run workflow): oha проти розгорнутого сервісу, таблиця в summary
 src/findex/
   cli.py       typer-застосунок: findex index / search / stats; логування — лише тут  # Lab 4
   __main__.py  python -m findex == findex
@@ -109,12 +115,28 @@ src/findex/
     mirror.py   локальний сервер-дзеркало із затримкою, robots.txt і навмисними збоями
     bench.py    бенчмарк concurrency 1 / 5 / 20 і порівняння з підходом Lab 5
     inline_demo.py  експеримент: індексація всередині циклу подій і що бачить debug-режим
+  web/                                                                          # Lab 7
+    app.py      create_app(), lifespan (індекс — один раз), middleware: request id і чистий 500
+    api.py      GET /search, /docs/{doc_id}, /stats, /health
+    ui.py       GET / і /doc/{doc_id}: Jinja2 + htmx
+    service.py  run_search, get_document, IndexHolder — без FastAPI, на dataclass-ах лаб 2–3
+    models.py   Pydantic-моделі лише на межі (вхід/вихід API)
+    deps.py     Depends: get_index, get_holder, налаштування
+    settings.py Settings(BaseSettings): INDEX_PATH, CORPUS_ROOT, LOG_LEVEL, LOG_FORMAT
+    logs.py     логи в stdout з request id; text або json
+    bench.py    20 одночасних запитів: def / async def / to_thread; таблиця oha
+    templates/, static/  сторінки, CSS, htmx
 docs/lab05/
   parallel.json  сирі результати бенчмарку (усі медіани, min..max, машина, IPC)
   speedup.png    графік прискорення
 docs/lab06/
   crawl_bench.json  сирі результати бенчмарку краулера
   failures.log      рядки crawl.log з обробленими збоями
+docs/lab07/
+  load.json         сирі результати: 20 одночасних запитів і oha
+  search-page.png   як виглядає сторінка пошуку
+Dockerfile          три етапи: залежності з uv.lock → корпус + індекс → slim-образ, не root
+render.yaml         Blueprint для Render: Docker, free, /health як перевірка
 scripts/
   get_corpus.sh     корпус .rst (лаби 1–5)
   build_mirror.sh   HTML-дзеркало docs.python.org для краулера (Lab 6)
@@ -127,6 +149,7 @@ tests/
   test_properties.py  5 властивостей Hypothesis                                # Lab 4
   test_parallel.py  serial merge == Lab 4, усі executors однакові, падіння воркера, spawn  # Lab 5
   test_crawler.py   fetch/robots/crawl через httpx.MockTransport, CLI проти локального дзеркала # Lab 6
+  test_web.py       усі маршрути через TestClient + dependency_overrides, 422/404/503/500  # Lab 7
   test_tokenize.py, test_corpus.py, test_index.py, test_model.py, test_query.py, test_rank.py
 ```
 
@@ -704,6 +727,7 @@ findex [-v|-vv] index  CORPUS --out FILE [--positions] [--limit N] [--layout …
                        [--executor serial|threads|processes] [-j|--workers N]
 findex crawl SEED_URL... [--max-pages 500] [-c|--concurrency 10] [--per-host 2] [--delay 0.5]
                        [-o data/crawl.jsonl] [--log crawl.log] [--allow-domain D] [--debug]
+findex serve [--index FILE] [--host 127.0.0.1] [--port 8000] [-w|--workers 1]   # HOST/PORT/WEB_CONCURRENCY з оточення
 findex [-v|-vv] search INDEX "QUERY" [-k 10] [--scorer bm25|tfidf] [--json] [--engine merge|set]
 findex [-v|-vv] stats  INDEX [--top 20] [--json]
 ```
@@ -1246,3 +1270,199 @@ INFO    robots  http://127.0.0.1:51733/genindex.html: disallowed by robots.txt
 9. **Процесорна робота під час обходу** — в `ProcessPoolExecutor` через
    `loop.run_in_executor`, а блокувальний I/O — в `asyncio.to_thread`. У findex простіше:
    обхід пише JSONL, а `findex index` індексує окремо.
+
+## Lab 7: пошук у вебі (FastAPI, Pydantic, Docker)
+
+![Сторінка пошуку findex](docs/lab07/search-page.png)
+
+### Маршрути
+
+| Маршрут | Що повертає | Помилки |
+|---|---|---|
+| `GET /search?q=&k=10&scorer=bm25&page=1` | `SearchResponse{query, scorer, page, k, total, pages, took_ms, results[]}` | 422 — параметри, 400 — запит не розбирається, 503 — індекс ще вантажиться |
+| `GET /docs/{doc_id}` | `DocumentResponse{doc_id, title, path, length, text}` | 404 — немає документа, 422 — id не число ≥ 0 |
+| `GET /stats` | документи, токени, словник, позиції, розмір файлу, `loaded_at`, `uptime_s` | 503 |
+| `GET /health` | `{"status": "ok", "documents": 560}` | 503 `{"status": "loading"}` або `{"status": "failed", "detail": …}` |
+| `GET /`, `GET /doc/{doc_id}` | сторінка пошуку і перегляд документа (Jinja2 + htmx) | 404-сторінка |
+| `GET /docs` | Swagger UI, згенерований FastAPI з анотацій і моделей | |
+
+Перевірка параметрів — це анотації типів, без жодного рядка ручної валідації:
+`q: Annotated[str, Query(min_length=1, max_length=500)]`, `k: Annotated[int, Query(ge=1, le=50)]`,
+`page: Annotated[int, Query(ge=1, le=100)]`, `scorer: Literal["bm25", "tfidf"]`.
+
+```text
+$ curl 'localhost:8000/search?q=x&k=0'
+{"detail":[{"type":"greater_than_equal","loc":["query","k"],"msg":"Input should be greater than or equal to 1","input":"0","ctx":{"ge":1}}]}   ← 422
+$ curl 'localhost:8000/search?q=a%20OR'
+{"detail":"bad query: query ends where a word, phrase or '(' was expected (at column 5)"}   ← 400
+$ curl localhost:8000/docs/99999
+{"detail":"no document with id 99999"}   ← 404
+```
+
+**Pydantic лише на межі.** `models.py` описує вхід і вихід API, і з цих класів будується
+OpenAPI на `/docs`. Усередині лишаються dataclass-и лаб 2–3: `SearchResult`, `DocMeta`, `Posting`.
+`service.py` про FastAPI нічого не знає: `run_search` повертає `SearchPage` з `Hit`, а
+`api.to_response` — єдине місце, де вони стають `SearchResponse`. Тому той самий
+`run_search` обслуговує і JSON API, і HTML-сторінку.
+
+**Індекс — один раз, у `lifespan`.** Шлях до файлу береться з `Settings.index_path`
+(змінна `INDEX_PATH`). Якщо файлу немає, сервер не стартує взагалі: неправильно
+налаштований деплой має падати одразу й голосно. Сам файл завантажується в потоці
+(`asyncio.to_thread`), тож порт відкривається одразу, а `/health` віддає `503 loading`, поки
+індекс не в пам'яті. Платформа бачить живий процес, який ще не готовий. Маршрути беруть
+індекс через `Depends(get_index)`, а тести підміняють його
+`app.dependency_overrides[get_index] = lambda: tiny_index`.
+
+**Конфіг — лише з оточення** (`pydantic-settings`, 12-factor III): `INDEX_PATH`, `CORPUS_ROOT`
+(де лежать тексти для сніпетів), `LOG_LEVEL`, `LOG_FORMAT=text|json`, а для `findex serve` —
+`HOST`, `PORT`, `WEB_CONCURRENCY`. Помилка в конфігу (`LOG_LEVEL=LOUD`) дає один рядок і
+код 1 ще до запуску uvicorn. Шляхів і портів у коді немає.
+
+**Request id і чистий 500.** Чисте ASGI-middleware `RequestContext` присвоює кожному запиту
+id (або бере `X-Request-ID` клієнта), повертає його в заголовку, пише один рядок
+access-логу і кладе id у `ContextVar`. Тому кожен рядок логу під час запиту, навіть із
+пулу потоків, несе цей id. Неочікуваний виняток іде в лог разом із трасою й id, а клієнт
+отримує лише `{"detail": "internal server error", "request_id": "…"}`. Тест перевіряє, що
+текст винятку назовні не потрапляє.
+
+```text
+2026-11-14 00:30:52,624 INFO    [22b0ad26246d] findex.web.access: GET /search?q=%22event%20loop%22&k=2 200 26.2 ms
+2026-11-14 00:30:52,632 INFO    [87d712a87fe7] findex.web.access: GET /search?q=x&k=0 422 0.4 ms
+```
+
+**Сторінка.** `GET /` рендерить Jinja2-шаблон: поле пошуку, вибір BM25/TF-IDF, сніпети з
+підсвіткою `<mark>`, бали, сторінки результатів, світла й темна тема, телефон. З `?q=`
+сторінка працює і без JavaScript, а будь-який результат має URL. htmx (покладено в
+`static/`, без CDN) додає пошук під час набору: форма шле `/?q=…` з заголовком `HX-Request`,
+маршрут відповідає лише фрагментом результатів, і htmx підставляє його в `#results` та
+оновлює адресу. `GET /doc/{id}?q=…` показує весь документ із підсвіченими словами запиту
+й переходом до першого збігу. У сніпетах прибрано розмітку reST (`:func:`, `**`, `====`),
+а в заголовках — `---` і `\ `.
+
+**Тести** (`tests/test_web.py`, 38) ходять через `TestClient` без файлу індексу. Вони
+перевіряють успішний пошук, пагінацію, обидва скорери, дев'ять варіантів 422, 400, 404,
+`/health` → 503 до завантаження і при зламаному файлі, 500 з request id, сторінки, фрагмент
+htmx, статику і `lifespan` зі справжнім файлом. Окремо перевірено, що без файлу сервер не
+стартує.
+
+### `def` чи `async def`: виміряно
+
+Пошук — це робота процесора: BM25 і сніпети. `python -m findex.web.bench index.pkl` піднімає
+один процес uvicorn із трьома варіантами маршруту і шле **20 одночасних запитів** (різні
+запити, після прогріву). Під час цього пакета кожні 10 мс опитується `/health`, щоб
+побачити, чи відповідає цикл подій. Медіана п'яти раундів:
+
+| Варіант маршруту | 20 разом: усього | p50 запиту | найповільніший | `/health` чекав (max) | `/health` p50 |
+|---|---:|---:|---:|---:|---:|
+| `def` (у коді) | 243 ms | 209 ms | 239 ms | 104 ms | 10.7 ms |
+| `async def`, робота на циклі | 190 ms | 105 ms | 182 ms | 129 ms | 10.9 ms |
+| `async def` + `await asyncio.to_thread` | 237 ms | 168 ms | 234 ms | 61 ms | 6.9 ms |
+
+Чесно: `async def` тут **не повільніший**, навіть трохи швидший. Двадцять пошуків
+виконуються один за одним в одному потоці, без перемикань GIL між 40 потоками пулу. Але
+поки кожен із них рахує, цикл подій стоїть: жоден інший запит, навіть `/health`, не може
+почати виконуватися, і `/health` чекав до 129 мс. Один повільний запит (сторінка 100, `k=50`,
+великий документ) зупинив би весь сервер на свій час. `def` віддає роботу в пул потоків
+Starlette, і цикл лишається вільним приймати з'єднання й відповідати. `/health` усе одно
+чекає, бо потоки ділять GIL (лаба 5), але вже не стоїть у черзі за всіма пошуками. Найкраще
+відповідає `to_thread`: у типовому пулі `asyncio` лише `cpu + 4` потоків, менше конкуренції за
+GIL. **У коді лишився `def`**, а `/health` і залежності (`get_index`, `get_holder`) — `async def`,
+бо нічого не блокують і мають відповідати одразу, навіть коли всі потоки пулу зайняті.
+
+### Навантаження: oha
+
+Локально: та сама машина (2 ядра), `oha -z 20s -c 50 --rand-regex-url` — кожен запит бере
+випадкове слово з 12 (`asyncio`, `thread`, `unicode`, `dict`, …), `k=10`. Розгорнутий сервіс
+міряє workflow **Load test** (`.github/workflows/loadtest.yml`) з GitHub-раннера.
+
+| Ціль | Маршрут | Concurrency | RPS | p50 | p95 | p99 |
+|---|---|---:|---:|---:|---:|---:|
+| local, 1 worker, `async def` | `/search-async` | 50 | 114 | 423 ms | 505 ms | 941 ms |
+| local, 1 worker, `def` | `/search` | 50 | 90 | 550 ms | 765 ms | 958 ms |
+| local, 4 workers, `def` | `/search` | 50 | **216** | **194 ms** | 516 ms | 706 ms |
+| deployed (Render, free) | `/search` | 20 | _після деплою_ | | | |
+
+**Як ці рядки пов'язані з лабами 5–6.** Один процес Python рахує на одному ядрі, бо пошук
+тримає GIL. Тому 50 одночасних клієнтів просто стоять у черзі, і за законом Літтла p50 ≈
+concurrency / RPS: 50 / 90 ≈ 0.55 с. Це ми й бачимо: 550 мс при тому, що сам пошук займає
+≈ 10 мс. `async def` дає більше RPS (114), бо немає перемикань GIL між потоками, але й найдовший
+хвіст. `def` з пулом потоків (лаба 6: заблокуєш цикл — зупиниться все) тримає цикл вільним,
+але не додає процесора: потоки чергуються на GIL. Чотири **процеси** (`--workers 4`, лаба 5)
+обходять GIL: 216 RPS — у 2.4 раза більше, ніж один `def`-воркер. Більше не виходить, бо ядер
+лише 2, і oha забирає частину процесора. Через це p50 падає до 194 мс, а p99 — з 958 до 706 мс.
+Ціна — пам'ять: кожен воркер тримає свою копію індексу (≈ 230 MiB RSS на процес).
+
+**Знахідка по дорозі.** Перший прогін дав лише 18–24 RPS. Профайлер показав, що 99 %
+часу запиту йде на сніпети, а не на BM25 (0.4 мс): `snippet_parts` токенізує *весь* документ,
+щоб знайти збіги, а на сторінці в 200 КБ це 20 мс. `fast_snippet` спершу шукає кандидатів
+одним регулярним виразом, а точну токенізацію запускає лише для вікна в кількасот символів.
+Якщо регулярний вираз нічого не знайшов (збіг лише після Unicode-нормалізації, як `Straße`), він
+повертається до точного шляху. Запит `class` прискорився з 75 до 13 мс, пропускна здатність
+зросла вп'ятеро (тест перевіряє, що підсвічуються ті самі слова).
+
+### Docker
+
+```bash
+docker build -t findex .
+docker run --rm -p 8000:8000 findex                         # індекс, вбудований в образ
+docker run --rm -p 8000:8000 -v "$PWD/crawl.pkl:/srv/crawl.pkl:ro" \
+    -e INDEX_PATH=/srv/crawl.pkl findex                     # будь-який інший індекс
+```
+
+Три етапи. `deps` ставить залежності з `uv.lock` (`uv sync --locked --no-dev`, спершу без
+проєкту, щоб цей шар перевикористовувався, поки lock не змінився), потім findex як звичайний
+пакет. `corpus` бере джерела документації CPython на зафіксованому коміті `386d9d0` (той
+самий, що в розділі «Корпус») і будує індекс з позиціями. Фінальний образ — `python:3.13-slim`
+з venv, корпусом (для сніпетів) і індексом, процес від користувача `findex` (uid 10001), не
+root. `HEALTHCHECK` опитує `/health`, а команда — `findex serve`, тож вхід, як і раніше, через
+CLI. CI збирає образ на кожен push, запускає контейнер, чекає `/health`, шукає і перевіряє,
+що процес не від root (job `docker` у `ci.yml`).
+
+### Деплой (Render)
+
+`render.yaml` — Blueprint: Docker, план free, регіон Frankfurt, `healthCheckPath: /health`,
+автодеплой на push у `main`. Змінні: `WEB_CONCURRENCY=1` (512 МБ на free-плані, а один процес
+з індексом займає ≈ 230 МБ), `LOG_FORMAT=json` (один JSON на рядок, з `request_id`, видно в
+панелі Logs), `LOG_LEVEL=INFO`. `PORT` задає сама платформа, а образ його читає. Поки `/health`
+віддає 503, Render не пускає трафік на новий інстанс і лишає старий: це деплой без
+простою. Якщо нова версія так і не стала здоровою, деплой позначається як невдалий. Free-план
+засинає після 15 хвилин без запитів, і перший запит після цього чекає, поки контейнер
+прокинеться (до хвилини).
+
+### Reflection: коротко
+
+1. **Шлях запиту.** uvicorn приймає TCP-з'єднання й розбирає HTTP, потім викликає
+   застосунок за ASGI: `app(scope, receive, send)`. Starlette проводить запит крізь middleware
+   (`RequestContext`, CORS) і маршрутизатор. FastAPI розв'язує `Depends` і через Pydantic
+   перетворює рядки параметрів на типи або повертає 422. Далі викликається функція маршруту
+   (`def` — у пулі потоків), результат перевіряється за `response_model`, серіалізується в
+   JSON і через `send` повертається в uvicorn, а той — у сокет.
+2. **WSGI і ASGI.** WSGI — синхронна функція «запит → відповідь»: одночасних запитів стільки,
+   скільки потоків чи процесів. ASGI — `async`-виклик з подіями `receive`/`send`: один
+   процес тримає тисячі з'єднань, як краулер із лаби 6, а також WebSocket і стрімінг.
+3. **Як `k: int = Query(ge=1)` стає 422.** FastAPI на старті читає сигнатуру й анотації
+   (`typing.get_type_hints`, `Annotated` — лаба 4) і будує з них модель Pydantic. На кожен
+   запит рядок `"0"` валідується цією моделлю. `ValidationError` FastAPI перетворює на 422 з
+   переліком помилок (`loc`, `msg`, `input`).
+4. **Pydantic чи dataclass.** Pydantic — на межі, де дані ненадійні: параметри, відповіді
+   API, змінні оточення. Він перевіряє й приводить типи, а це коштує часу. Усередині, де дані
+   вже наші і їх мільйони (`Posting` у постінгах), — dataclass зі `slots`: без перевірок
+   і з меншою пам'яттю.
+5. **`Depends`.** FastAPI викликає функцію-залежність перед маршрутом і передає результат
+   як аргумент. У тестах `app.dependency_overrides[get_index] = lambda: tiny_index`
+   підміняє індекс, і маршрут про це навіть не знає.
+6. **30 мс процесора: `def` чи `async def`?** `def`, або `async def` з `await
+   asyncio.to_thread(...)`. З `async def` без цього 50 запитів виконуються строго по черзі на
+   циклі, а він на ці 1.5 с не приймає нових з'єднань і не відповідає на `/health`.
+   Платформа може вирішити, що сервіс мертвий, і перезапустити його.
+7. **Конфіг з оточення.** Один і той самий образ має працювати і в dev, і в prod. Різниця між
+   ними — лише в змінних оточення, а секрети не потрапляють у git. Для цього образ не повинен
+   містити жодного шляху чи пароля, і все, що відрізняється між середовищами, має читатися
+   з `Settings`.
+8. **p99 при одному і чотирьох воркерах.** Один процес — один GIL: усі 50 запитів
+   чергуються на одному ядрі, і хвіст росте (958 мс). Чотири процеси рахують на обох ядрах
+   паралельно (лаба 5), черга вдвічі коротша, і p99 падає до 706 мс.
+9. **Що має перевіряти `/health`.** Що процес живий **і готовий**: індекс у пам'яті. Тому
+   він віддає 503, поки індекс вантажиться або якщо завантаження впало. Не варто робити його
+   дорогим: це `async def` без пошуку. На 503 Render не пускає трафік на новий інстанс і
+   лишає старий, а якщо 503 не минає — позначає деплой як невдалий.

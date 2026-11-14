@@ -1,0 +1,19 @@
+# Render Blueprint: New → Blueprint → this repository. Builds the Dockerfile,
+# probes /health, redeploys on every push to main.
+services:
+  - type: web
+    name: findex
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # PORT is set by Render; the image reads it (findex serve --port defaults to $PORT).
+      - key: WEB_CONCURRENCY
+        value: "1"   # 512 MB on the free plan: one process holds the index (~230 MB)
+      - key: LOG_FORMAT
+        value: json
+      - key: LOG_LEVEL
+        value: INFO

@@ -1,0 +1,54 @@
+# Load-test the deployed service with oha: Actions → "Load test" → Run workflow.
+# The result (RPS, p50/p95/p99) lands in the run's summary page.
+name: Load test
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Base URL of the deployed service, e.g. https://findex.onrender.com"
+        required: true
+      concurrency:
+        description: "Concurrent clients"
+        default: "20"
+      seconds:
+        description: "Duration in seconds"
+        default: "30"
+
+jobs:
+  oha:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install oha
+        run: |
+          curl -fsSL -o oha https://github.com/hatoo/oha/releases/latest/download/oha-linux-amd64 \
+            || cargo install oha --locked --root .
+          chmod +x oha 2>/dev/null || cp bin/oha oha
+          ./oha --version
+
+      - name: Wake the service up (the free plan sleeps after 15 idle minutes)
+        run: |
+          for i in $(seq 1 60); do
+            curl -fsS "${{ inputs.url }}/health" && exit 0
+            sleep 5
+          done
+          exit 1
+
+      - name: Run oha against /search
+        run: |
+          # --rand-regex-url: a dot must be written [.] for oha (it doesn't read "\." as a dot)
+          base=$(printf '%s' "${{ inputs.url }}" | sed -e 's|/$||' -e 's|[.]|[.]|g')
+          ./oha -z "${{ inputs.seconds }}s" -c "${{ inputs.concurrency }}" --no-tui --output-format json \
+            --rand-regex-url "${base}/search\?q=(asyncio|thread|unicode|dict|socket|import|class|loop|file|string|json|error)&k=10" \
+            > oha.json
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open("oha.json"))
+          p = d["latencyPercentiles"]
+          codes = d.get("statusCodeDistribution", {})
+          print("| Target | Route | Concurrency | RPS | p50 (ms) | p95 (ms) | p99 (ms) | status codes |")
+          print("|---|---|---:|---:|---:|---:|---:|---|")
+          print(f"| deployed | /search | ${{ inputs.concurrency }} | {d['summary']['requestsPerSec']:.1f} "
+                f"| {p['p50'] * 1000:.0f} | {p['p95'] * 1000:.0f} | {p['p99'] * 1000:.0f} | {codes} |")
+          PY
+          cat "$GITHUB_STEP_SUMMARY"

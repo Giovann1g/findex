@@ -1,6 +1,6 @@
 [project]
 name = "findex"
-version = "0.4.0"
+version = "0.7.0"
 description = "A full-text search engine over your own corpus: streaming indexer, BM25 ranking, Boolean/phrase queries, CLI."
 readme = "README.md"
 authors = [{ name = "Oleksandr Kukharskyi" }]
@@ -14,10 +14,14 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "fastapi>=0.162.7",
     "httpx>=0.28.1",
+    "jinja2>=3.1.6",
+    "pydantic-settings>=2.16.3",
     "rich>=15.0.0",
     "selectolax>=1.0.2",
     "typer>=0.27.3",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [project.urls]
@@ -55,6 +59,10 @@ typeCheckingMode = "strict"
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = ["slow: takes more than a second; skip with -m 'not slow'"]
+filterwarnings = [
+    # Starlette's TestClient now prefers the httpx2 fork; httpx (what findex uses) still works
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
 
 [tool.coverage.run]
 source = ["findex"]
@@ -71,6 +79,7 @@ omit = [
     "*/findex/race.py",
     "*/findex/crawler/bench.py",
     "*/findex/crawler/inline_demo.py",
+    "*/findex/web/bench.py",
     "*/findex/__main__.py",
 ]
 

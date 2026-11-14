@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}{% if q %}{{ q }} — findex{% else %}findex — пошук по документації Python{% endif %}{% endblock %}
+{% block main %}
+<section class="search{% if not q %} search--hero{% endif %}">
+  {% if not q %}
+  <h1>Пошук по документації Python</h1>
+  <p class="lead">
+    {% if index %}{{ "{:,}".format(index.num_docs).replace(",", " ") }} сторінок,
+    {{ "{:,}".format(index|length).replace(",", " ") }} слів в індексі.{% endif %}
+    Фрази в лапках, <code>AND</code> / <code>OR</code> / <code>NOT</code> і дужки.
+  </p>
+  {% endif %}
+  <form action="/" method="get" role="search"
+        hx-get="/" hx-target="#results" hx-push-url="true"
+        hx-trigger="submit, input changed delay:300ms from:#q, change from:#scorer"
+        hx-indicator="#results">
+    <div class="box">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="13" cy="13" r="8"/><path d="M19 19l8 8"/></svg>
+      <input id="q" name="q" type="search" value="{{ q }}" placeholder='наприклад: "event loop" AND cancel'
+             autocomplete="off" spellcheck="false" maxlength="500" {% if not q %}autofocus{% endif %}
+             aria-label="Пошуковий запит">
+      <select id="scorer" name="scorer" aria-label="Ранжування">
+        <option value="bm25" {% if scorer == "bm25" %}selected{% endif %}>BM25</option>
+        <option value="tfidf" {% if scorer == "tfidf" %}selected{% endif %}>TF-IDF</option>
+      </select>
+      <button type="submit">Шукати</button>
+    </div>
+  </form>
+  {% if not q %}
+  <p class="examples">Спробуйте:
+    {% for ex in examples %}<a href="/?q={{ ex|urlencode }}">{{ ex }}</a>{% endfor %}
+  </p>
+  {% endif %}
+</section>
+<div id="results" aria-live="polite">
+  {% include "_results.html" %}
+</div>
+{% endblock %}

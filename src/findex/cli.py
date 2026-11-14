@@ -1,4 +1,4 @@
-"""The ``findex`` command: ``findex crawl``, ``index``, ``search``, ``stats``.
+"""The ``findex`` command: ``crawl``, ``index``, ``search``, ``stats``, ``serve``.
 
 Streams: results (the table, ``--json`` lines, the stats) go to **stdout**;
 progress bars, log lines and errors go to **stderr** — so
@@ -488,3 +488,53 @@ def crawl_cmd(
             soft_wrap=True,
         )
     stderr.print(f"next: findex index {out} -o crawl.pkl --positions", soft_wrap=True)
+
+
+# --------------------------------------------------------------------------- serve
+@app.command("serve")
+def serve_cmd(
+    index: Annotated[
+        Path | None,
+        typer.Option("--index", help="Index file to serve (else INDEX_PATH from the environment)."),
+    ] = None,
+    host: Annotated[str, typer.Option(envvar="HOST", help="Interface to listen on.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(envvar="PORT", min=1, max=65535)] = 8000,
+    workers: Annotated[
+        int, typer.Option("--workers", "-w", envvar="WEB_CONCURRENCY", min=1, help="Processes.")
+    ] = 1,
+) -> None:
+    """Serve the search API and web page with uvicorn (config from the environment)."""
+    from pydantic import ValidationError
+
+    if index is not None:
+        os.environ["INDEX_PATH"] = str(index)  # the worker processes read it too
+    from findex.web.settings import Settings
+
+    try:
+        settings = Settings()
+    except ValidationError as exc:  # e.g. LOG_LEVEL=LOUD: say so now, not on a request
+        fail("bad configuration: " + "; ".join(
+            f"{'.'.join(map(str, e['loc'])).upper()}: {e['msg']}" for e in exc.errors()
+        ))  # fmt: skip
+    if not settings.index_path.is_file():
+        fail(f"index file not found: {settings.index_path} (set INDEX_PATH or pass --index)")
+
+    import uvicorn
+
+    from findex.web.logs import logging_config
+
+    stderr.print(
+        f"findex serve: {settings.index_path} on http://{host}:{port}/ "
+        f"({workers} worker{'s' if workers > 1 else ''})",
+        soft_wrap=True,
+    )
+    uvicorn.run(
+        "findex.web.app:app",
+        host=host,
+        port=port,
+        workers=workers,
+        log_config=logging_config(settings.log_level, settings.log_format),
+        access_log=False,  # findex.web logs one line per request, with its request id
+        proxy_headers=True,  # behind the platform's proxy: real client address and scheme
+        forwarded_allow_ips="*",
+    )

@@ -38,3 +38,23 @@ jobs:
           uv pip install --python /tmp/clean dist/*.whl
           /tmp/clean/bin/findex --help
           /tmp/clean/bin/findex --version
+
+  docker:
+    # The Dockerfile is part of the product: build it and prove the container serves.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t findex .
+
+      - name: Run it, wait for /health, search, check the user
+        run: |
+          docker run -d --name findex -p 8000:8000 findex
+          for i in $(seq 1 60); do curl -fsS localhost:8000/health && break; sleep 1; done
+          curl -fsS localhost:8000/health
+          curl -fsS "localhost:8000/search?q=asyncio&k=3" | python3 -m json.tool | head -20
+          curl -fsS -o /dev/null localhost:8000/
+          test "$(docker inspect --format '{{.Config.User}}' findex)" = findex
+          test "$(docker exec findex id -u)" != 0
+          docker logs findex | tail -5

@@ -1,0 +1,20 @@
+# Only pyproject.toml, uv.lock, README.md and src/ go into the image build.
+.git
+.github
+.venv
+.venv-ft
+data
+dist
+docs
+eval
+scripts
+tests
+index.*
+*.pkl
+crawl.log
+**/__pycache__
+.pytest_cache
+.ruff_cache
+.hypothesis
+.coverage
+.env

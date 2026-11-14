@@ -1,0 +1,39 @@
+{% if status != "ok" %}
+  <p class="notice">Індекс ще завантажується — спробуйте за кілька секунд.</p>
+{% elif error %}
+  <p class="notice notice--error">{{ error }}</p>
+{% elif result %}
+  {% if result.total == 0 %}
+    <p class="meta">Нічого не знайдено за запитом <strong>{{ result.query }}</strong>.</p>
+  {% else %}
+    <p class="meta">
+      {{ "{:,}".format(result.total).replace(",", " ") }}
+      {% if result.total % 10 == 1 and result.total % 100 != 11 %}документ{% elif result.total % 10 in [2, 3, 4] and result.total % 100 not in [12, 13, 14] %}документи{% else %}документів{% endif %}
+      · сторінка {{ result.page }} з {{ result.pages }}
+      · {{ "%.1f"|format(result.took_ms) }} мс · {{ "BM25" if result.scorer == "bm25" else "TF-IDF" }}
+    </p>
+    <ol class="hits" start="{{ result.hits[0].rank if result.hits else 1 }}">
+      {% for hit in result.hits %}
+      <li class="hit">
+        <a class="title" href="/doc/{{ hit.result.doc_id }}?q={{ result.query|urlencode }}">{{ hit.title }}</a>
+        <div class="path"><span>{{ hit.path }}</span><span class="score" title="бал ранжування">{{ "%.2f"|format(hit.result.score) }}</span></div>
+        {% if hit.snippet %}
+        <p class="snippet">{% for text, is_hit in hit.snippet %}{% if is_hit %}<mark>{{ text }}</mark>{% else %}{{ text }}{% endif %}{% endfor %}</p>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+    {% if result.pages > 1 %}
+    {% set base = "/?q=" ~ (result.query|urlencode) ~ "&scorer=" ~ result.scorer ~ "&k=" ~ result.k %}
+    <nav class="pager" aria-label="Сторінки результатів" hx-target="#results" hx-push-url="true">
+      {% if result.page > 1 %}<a href="{{ base }}&page={{ result.page - 1 }}" hx-get="{{ base }}&page={{ result.page - 1 }}" rel="prev">← Назад</a>{% endif %}
+      {% for n in pages %}
+        {% if n is none %}<span class="gap">…</span>
+        {% elif n == result.page %}<span class="current" aria-current="page">{{ n }}</span>
+        {% else %}<a href="{{ base }}&page={{ n }}" hx-get="{{ base }}&page={{ n }}">{{ n }}</a>{% endif %}
+      {% endfor %}
+      {% if result.page < result.pages and result.page < 100 %}<a href="{{ base }}&page={{ result.page + 1 }}" hx-get="{{ base }}&page={{ result.page + 1 }}" rel="next">Далі →</a>{% endif %}
+    </nav>
+    {% endif %}
+  {% endif %}
+{% endif %}
