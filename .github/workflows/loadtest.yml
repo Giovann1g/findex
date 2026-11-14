@@ -28,8 +28,9 @@ jobs:
 
       - name: Wake the service up (the free plan sleeps after 15 idle minutes)
         run: |
+          url=$(printf '%s' "${{ inputs.url }}" | sed -e 's|/*$||')  # "…com/" → "…com"
           for i in $(seq 1 60); do
-            curl -fsS "${{ inputs.url }}/health" && exit 0
+            curl -fsS "$url/health" && exit 0
             sleep 5
           done
           exit 1
@@ -37,7 +38,7 @@ jobs:
       - name: Run oha against /search
         run: |
           # --rand-regex-url: a dot must be written [.] for oha (it doesn't read "\." as a dot)
-          base=$(printf '%s' "${{ inputs.url }}" | sed -e 's|/$||' -e 's|[.]|[.]|g')
+          base=$(printf '%s' "${{ inputs.url }}" | sed -e 's|/*$||' -e 's|[.]|[.]|g')
           ./oha -z "${{ inputs.seconds }}s" -c "${{ inputs.concurrency }}" --no-tui --output-format json \
             --rand-regex-url "${base}/search\?q=(asyncio|thread|unicode|dict|socket|import|class|loop|file|string|json|error)&k=10" \
             > oha.json
