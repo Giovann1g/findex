@@ -7,7 +7,9 @@ Three interchangeable postings *layouts* (the subject of the Lab 2 memory study)
 
 * ``plain`` — ``list[PlainPosting]``, a ``@dataclass(frozen=True)`` without slots;
 * ``slots`` — ``list[Posting]``, ``@dataclass(frozen=True, slots=True)`` (default);
-* ``array`` — a pair of ``array('I')`` per term: ``(doc_ids, tfs)``, no objects.
+* ``array`` — a pair of ``array('I')`` per term: ``(doc_ids, tfs)``, no objects;
+* ``numpy`` — (Lab 8) all postings in one pair of NumPy ``int32`` arrays (CSR),
+  positions too, document lengths as one ``int32`` array; see :mod:`findex.npindex`.
 
 doc_ids are dense ints ``0..N-1`` assigned in stream order. Each document's
 postings are appended *after* all earlier documents', so every postings list
@@ -24,7 +26,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
 
 from findex.corpus import Document
 from findex.merge import MERGE, Engine
@@ -32,6 +34,10 @@ from findex.timing import timed
 from findex.tokenize import tokenize
 
 if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
+
+    from findex.npindex import CsrPostings, NpPostings
     from findex.query import Node
     from findex.rank import SearchResult
 
@@ -39,8 +45,8 @@ log = logging.getLogger(__name__)
 
 # A plain assignment, not a PEP 695 `type` statement: typer reads this annotation
 # at runtime to build CLI choices and doesn't understand `TypeAliasType` objects.
-Layout = Literal["plain", "slots", "array"]
-LAYOUTS: tuple[Layout, ...] = ("plain", "slots", "array")
+Layout = Literal["plain", "slots", "array", "numpy"]
+LAYOUTS: tuple[Layout, ...] = ("plain", "slots", "array", "numpy")
 
 
 class PostingLike(Protocol):
@@ -84,7 +90,7 @@ class DocMeta:
 
 type IdArray = array[int]
 type ArrayPostings = tuple[IdArray, IdArray]  # (doc_ids, tfs)
-type PostingList = list[Posting] | list[PlainPosting] | ArrayPostings
+type PostingList = list[Posting] | list[PlainPosting] | ArrayPostings | NpPostings
 
 
 class CacheStats(Protocol):
@@ -121,7 +127,7 @@ class Index(Mapping[str, Sequence[PostingLike]]):
 
     def __init__(
         self,
-        postings: Mapping[str, PostingList],
+        postings: Mapping[str, PostingList] | CsrPostings,
         doc_lengths: dict[int, int],
         doc_meta: dict[int, DocMeta],
         layout: Layout = "slots",
@@ -135,9 +141,14 @@ class Index(Mapping[str, Sequence[PostingLike]]):
         self.has_positions = has_positions
         self.meta: dict[str, object] = dict(meta or {})
         self.closed = False
+        # Lab 8: document lengths as one int32 array, indexed by doc id. The
+        # numpy layout stores it; findex.vecrank builds it for other layouts.
+        self.lengths: NDArray[np.int32] | None = None
 
     # --- the Mapping protocol ------------------------------------------------
     def __getitem__(self, term: str) -> Sequence[PostingLike]:
+        if self.layout == "numpy":  # objects (with positions) only on demand
+            return cast("CsrPostings", self.postings).records(term)
         plist = self.postings[term]  # KeyError for an unknown term, like a dict
         if isinstance(plist, tuple):  # array layout: rebuild records on demand
             ids, tfs = plist
@@ -185,7 +196,7 @@ class Index(Mapping[str, Sequence[PostingLike]]):
 
     def collection_frequency(self, term: str) -> int:
         """Total occurrences of ``term`` in the corpus (sum of tf)."""
-        return sum(self.tfs(term))
+        return int(sum(self.tfs(term)))  # int(): numpy layout sums np.int32
 
     # --- query support -------------------------------------------------------
     def match(self, node: Node, engine: Engine = MERGE) -> tuple[int, ...]:
@@ -210,7 +221,7 @@ class Index(Mapping[str, Sequence[PostingLike]]):
         # and keep every index ever searched alive.
         @lru_cache(maxsize=256)
         def match_ids(node: Node, engine: Engine) -> tuple[int, ...]:
-            return tuple(node.evaluate(self, engine))
+            return tuple(map(int, node.evaluate(self, engine)))  # plain ints, any layout
 
         return match_ids
 
@@ -238,6 +249,8 @@ class Index(Mapping[str, Sequence[PostingLike]]):
         state: dict[str, object] = dict(self.__dict__)
         state.pop("_match_cache", None)
         state.pop("avg_doc_length", None)
+        state.pop("_vec_cache", None)
+        state.pop("_np_match", None)
         return state
 
     # --- raw access used by the Boolean engines and the Lab 2 benchmarks ------
@@ -246,8 +259,8 @@ class Index(Mapping[str, Sequence[PostingLike]]):
         plist = self.postings.get(term)
         if plist is None:
             return ()
-        if isinstance(plist, tuple):
-            return plist[0]
+        if isinstance(plist, tuple):  # array('I') or a NumPy view: both index like a list
+            return cast("Sequence[int]", plist[0])
         return [p.doc_id for p in plist]
 
     def tfs(self, term: str) -> Sequence[int]:
@@ -255,7 +268,7 @@ class Index(Mapping[str, Sequence[PostingLike]]):
         if plist is None:
             return ()
         if isinstance(plist, tuple):
-            return plist[1]
+            return cast("Sequence[int]", plist[1])
         return [p.tf for p in plist]
 
     def df(self, term: str) -> int:
@@ -296,6 +309,10 @@ def build_index(
     docs: Iterable[Document], layout: Layout = "slots", positions: bool = False
 ) -> Index:
     """One pass over a *stream* of documents; nothing but the index is retained."""
+    if layout == "numpy":  # build with objects/arrays, then pack into int32 CSR arrays
+        from findex.npindex import to_numpy
+
+        return to_numpy(build_index(docs, "slots" if positions else "array", positions))
     if layout == "array" and positions:
         raise ValueError("positions are only kept in the object layouts (plain/slots)")
 

@@ -35,9 +35,10 @@ Token rules
 from __future__ import annotations
 
 import re
-import sys
 import unicodedata
 from collections.abc import Iterator
+
+from findex._marks import RANGES
 
 WORD_RE = re.compile(r"[^\W_]+(?:['_][^\W_]+)*")
 
@@ -46,12 +47,11 @@ _APOSTROPHES[0x00AD] = None  # soft hyphen
 
 
 def _combining_class() -> re.Pattern[str]:
-    """A regex matching every combining mark (built once, at import)."""
-    marks = "".join(
-        re.escape(chr(cp))
-        for cp in range(0x0300, min(sys.maxunicode, 0xE01EF) + 1)
-        if unicodedata.combining(chr(cp))
-    )
+    """A regex matching every combining mark, from the precomputed ranges.
+
+    (Lab 8: scanning all code points here cost 0.4 s per process start.)
+    """
+    marks = "".join(f"{re.escape(chr(a))}-{re.escape(chr(b))}" for a, b in RANGES)
     return re.compile(f"[{marks}]+")
 
 
@@ -63,8 +63,13 @@ def normalize(text: str) -> str:
     text = unicodedata.normalize("NFC", text).casefold()
     if not text.isascii():
         text = text.translate(_APOSTROPHES)
-        # after casefold: "İ".casefold() == "i̇", the mark is dropped too
-        text = _COMBINING_RE.sub("", text)
+        # after casefold: "İ".casefold() == "i̇", the mark is dropped too.
+        # Only a non-ASCII line can hold a mark: str.isascii is a C scan many
+        # times faster than running the regex over every line (Lab 8 profile:
+        # the sub was 30 % of `findex index`).
+        text = "\n".join(
+            line if line.isascii() else _COMBINING_RE.sub("", line) for line in text.split("\n")
+        )
     return text
 
 

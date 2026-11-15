@@ -98,7 +98,7 @@ EngineName = Literal["merge", "set"]
 
 @dataclass(frozen=True, slots=True)
 class Engine:
-    name: EngineName
+    name: str  # "merge", "set" — or "numpy" (findex.npindex.NUMPY, Lab 8)
     and_: SetOp
     or_: SetOp
     not_: SetOp

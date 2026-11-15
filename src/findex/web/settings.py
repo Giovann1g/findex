@@ -7,6 +7,8 @@ image runs on a laptop and on Render — only the environment differs::
     INDEX_PATH=/app/index/index.pkl   the index to serve (required in practice)
     CORPUS_ROOT=/app/data             where the documents are, for snippets
                                       (default: the root stored in the index)
+    EMBEDDINGS_PATH=/app/index/embeddings.npy   enables mode=semantic and hybrid
+    MODEL_DIR=/app/models/all-MiniLM-L6-v2      model.onnx + tokenizer.json
     LOG_LEVEL=INFO                    DEBUG / INFO / WARNING
     LOG_FORMAT=text                   text, or json (one object per line)
 
@@ -29,6 +31,8 @@ class Settings(BaseSettings):
 
     index_path: Path = Path("index.pkl")
     corpus_root: Path | None = None
+    embeddings_path: Path | None = None
+    model_dir: Path = Path("models/all-MiniLM-L6-v2")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["text", "json"] = "text"
 

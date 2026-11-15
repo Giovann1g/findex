@@ -22,11 +22,12 @@ from typer.testing import CliRunner
 from findex.cli import app as cli
 from findex.corpus import iter_documents
 from findex.index import Index, build_index
+from findex.snippets import tidy_rst
 from findex.store import save
 from findex.web.app import create_app
 from findex.web.deps import get_holder, get_index
 from findex.web.logs import JsonFormatter, RequestIdFilter, logging_config
-from findex.web.service import IndexHolder, highlight, run_search, tidy_rst
+from findex.web.service import IndexHolder, highlight, run_search
 from findex.web.settings import Settings
 from findex.web.ui import page_numbers
 
@@ -150,7 +151,8 @@ def test_openapi_page_documents_the_api(client: TestClient) -> None:
 
 # --- /health and 503 ----------------------------------------------------------------
 def test_health_ok(client: TestClient) -> None:
-    assert client.get("/health").json() == {"status": "ok", "documents": TEXT_DOCS}
+    body = client.get("/health").json()
+    assert body == {"status": "ok", "documents": TEXT_DOCS, "semantic": False}
 
 
 def test_health_is_503_until_the_index_is_loaded() -> None:
@@ -327,8 +329,7 @@ def test_tidy_rst_and_pager() -> None:
 
 
 def test_fast_snippet_matches_the_slow_one() -> None:
-    from findex.snippets import snippet_parts
-    from findex.web.service import fast_snippet
+    from findex.snippets import fast_snippet, snippet_parts
 
     text = "filler " * 200 + "The event loop runs; the Event Loop waits. " + "tail " * 200
     terms = frozenset({"event", "loop"})

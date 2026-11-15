@@ -1,5 +1,6 @@
 """Checks for the tokenizer rules documented in findex/tokenize.py."""
 
+import functools
 import inspect
 
 from findex.tokenize import tokenize
@@ -62,3 +63,57 @@ def test_empty_and_whitespace():
     assert toks("") == []
     assert toks("   \n\t  ") == []
     assert toks("—…!?") == []
+
+
+# --- Lab 8: the faster normalization must be the same normalization ---------------
+def test_combining_table_matches_this_unicode_version():
+    import unicodedata
+
+    from findex import _marks
+
+    assert unicodedata.unidata_version == _marks.UNIDATA_VERSION
+    assert _marks.scan() == _marks.RANGES  # regenerate with findex._marks if this fails
+
+
+@functools.cache
+def reference_marks() -> str:
+    import re
+    import sys
+    import unicodedata
+
+    return "".join(
+        re.escape(chr(cp))
+        for cp in range(0x0300, min(sys.maxunicode, 0xE01EF) + 1)
+        if unicodedata.combining(chr(cp))
+    )
+
+
+def reference_normalize(text: str) -> str:
+    """The Lab 1–7 algorithm, verbatim: scan the code points, sub the whole text."""
+    import re
+    import unicodedata
+
+    marks = reference_marks()
+    apostrophes: dict[int, str | None] = {ord(c): "'" for c in "’‘ʼ`"}
+    apostrophes[0x00AD] = None
+    text = unicodedata.normalize("NFC", text).casefold()
+    if not text.isascii():
+        text = text.translate(apostrophes)
+        text = re.sub(f"[{marks}]+", "", text)
+    return text
+
+
+def test_fast_normalize_equals_the_reference():
+    from hypothesis import given, settings
+    from hypothesis import strategies as st
+
+    from findex.tokenize import normalize
+
+    alphabet = st.sampled_from(list("aZé́̆мо́\nİ’ ̇ß—­⃝日"))
+
+    @settings(max_examples=300, deadline=None)
+    @given(st.text(alphabet=alphabet, max_size=40) | st.text(max_size=40))
+    def same(text: str) -> None:
+        assert normalize(text) == reference_normalize(text)
+
+    same()

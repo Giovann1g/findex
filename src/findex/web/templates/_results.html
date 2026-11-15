@@ -10,13 +10,14 @@
       {{ "{:,}".format(result.total).replace(",", " ") }}
       {% if result.total % 10 == 1 and result.total % 100 != 11 %}документ{% elif result.total % 10 in [2, 3, 4] and result.total % 100 not in [12, 13, 14] %}документи{% else %}документів{% endif %}
       · сторінка {{ result.page }} з {{ result.pages }}
-      · {{ "%.1f"|format(result.took_ms) }} мс · {{ "BM25" if result.scorer == "bm25" else "TF-IDF" }}
+      · {{ "%.1f"|format(result.took_ms) }} мс ·
+      {% if result.mode == "semantic" %}за змістом (косинус){% elif result.mode == "hybrid" %}гібрид: {{ "BM25" if result.scorer == "bm25" else "TF-IDF" }} + зміст (RRF){% else %}{{ "BM25" if result.scorer == "bm25" else "TF-IDF" }}{% endif %}
     </p>
     <ol class="hits" start="{{ result.hits[0].rank if result.hits else 1 }}">
       {% for hit in result.hits %}
       <li class="hit">
         <a class="title" href="/doc/{{ hit.result.doc_id }}?q={{ result.query|urlencode }}">{{ hit.title }}</a>
-        <div class="path"><span>{{ hit.path }}</span><span class="score" title="бал ранжування">{{ "%.2f"|format(hit.result.score) }}</span></div>
+        <div class="path"><span>{{ hit.path }}</span><span class="score" title="{% if result.mode == 'semantic' %}косинусна близькість найкращого фрагмента{% elif result.mode == 'hybrid' %}бал RRF{% else %}бал ранжування{% endif %}">{{ ("%.3f" if result.mode != "lexical" else "%.2f")|format(hit.result.score) }}</span></div>
         {% if hit.snippet %}
         <p class="snippet">{% for text, is_hit in hit.snippet %}{% if is_hit %}<mark>{{ text }}</mark>{% else %}{{ text }}{% endif %}{% endfor %}</p>
         {% endif %}
@@ -24,7 +25,7 @@
       {% endfor %}
     </ol>
     {% if result.pages > 1 %}
-    {% set base = "/?q=" ~ (result.query|urlencode) ~ "&scorer=" ~ result.scorer ~ "&k=" ~ result.k %}
+    {% set base = "/?q=" ~ (result.query|urlencode) ~ "&mode=" ~ result.mode ~ "&scorer=" ~ result.scorer ~ "&k=" ~ result.k %}
     <nav class="pager" aria-label="Сторінки результатів" hx-target="#results" hx-push-url="true">
       {% if result.page > 1 %}<a href="{{ base }}&page={{ result.page - 1 }}" hx-get="{{ base }}&page={{ result.page - 1 }}" rel="prev">← Назад</a>{% endif %}
       {% for n in pages %}

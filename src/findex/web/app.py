@@ -108,7 +108,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     path = settings.index_path
     if not path.is_file():
         raise RuntimeError(f"INDEX_PATH={path}: no such file")
-    holder = IndexHolder(path)
+    emb = settings.embeddings_path
+    if emb is not None and not emb.is_file():
+        raise RuntimeError(f"EMBEDDINGS_PATH={emb}: no such file")
+    holder = IndexHolder(path, embeddings_path=emb, model_dir=settings.model_dir)
     app.state.holder = holder
     log.info("findex %s: loading index %s", VERSION, path)
     loader = asyncio.create_task(asyncio.to_thread(holder.load), name="load-index")

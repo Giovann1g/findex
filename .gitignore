@@ -26,3 +26,7 @@ data/
 # crawler output (Lab 6): pages and per-URL logs are data, not sources
 crawl.log
 docs/lab06/runs/
+
+# Lab 8: the embedding model (scripts/get_model.sh) and benchmark history
+models/
+.benchmarks/

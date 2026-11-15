@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from findex.rank import ScorerName
+from findex.semantic import Mode
 from findex.web.deps import HolderDep, SettingsDep
 from findex.web.service import (
     BadQuery,
@@ -37,9 +38,9 @@ EXAMPLES = [
     "asyncio",
     '"event loop"',
     "unicode AND normalization",
-    "dict OR mapping",
     "thread NOT process",
     '"context manager" (with OR async)',
+    "run many things at the same time",  # no shared words with the pages: try "Зміст"
 ]
 
 
@@ -65,18 +66,27 @@ def home(
     page: Annotated[int, Query(ge=1, le=100)] = 1,
     k: Annotated[int, Query(ge=1, le=50)] = 10,
     scorer: ScorerName = "bm25",
+    mode: Mode | None = None,
 ) -> HTMLResponse:
     index = holder.index if holder else None
+    semantic = holder.semantic if holder else None
+    # the page defaults to hybrid when embeddings are loaded: meaning *and* words
+    chosen: Mode = mode or ("hybrid" if semantic is not None else "lexical")
     result: SearchPage | None = None
     error: str | None = None
     if q.strip() and index is not None:
         try:
-            result = run_search(index, q, k=k, page=page, scorer=scorer, root=settings.corpus_root)
+            result = run_search(
+                index, q, k=k, page=page, scorer=scorer, mode=chosen, semantic=semantic,
+                root=settings.corpus_root,
+            )  # fmt: skip
         except BadQuery as exc:
             error = str(exc)
     context = {
         "q": q,
         "scorer": scorer,
+        "mode": chosen,
+        "semantic": semantic is not None,
         "k": k,
         "result": result,
         "error": error,

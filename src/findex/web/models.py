@@ -30,6 +30,7 @@ class SearchHit(BaseModel):
 
 class SearchResponse(BaseModel):
     query: str
+    mode: str = Field(description="lexical (BM25/TF-IDF), semantic (embeddings) or hybrid (RRF)")
     scorer: str
     page: int = Field(ge=1)
     k: int = Field(ge=1, description="results per page")
@@ -56,6 +57,8 @@ class StatsResponse(BaseModel):
     layout: str
     index_path: str
     index_bytes: int
+    semantic_chunks: int | None = Field(description="embedded chunks; null: semantic off")
+    semantic_model: str | None
     loaded_at: datetime
     uptime_s: float
 
@@ -63,6 +66,7 @@ class StatsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str = Field(examples=["ok", "loading", "failed"])
     documents: int | None = None
+    semantic: bool | None = None
     detail: str | None = None
 
 

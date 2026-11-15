@@ -2,7 +2,7 @@
 
 Recorded before a single line of `findex` was changed for Lab 8, on the machine
 from Labs 5–7 (Intel Xeon @ 2.10 GHz, 2 cores, Python 3.13.18). Full corpus:
-560 CPython documentation pages, 41,008 terms, 2.3 M tokens, index with positions
+560 CPython documentation pages, 41,008 terms, 1.8 M tokens, index with positions
 (`slots` layout, `index.pkl`, 11 MB).
 
 | What | Command | cProfile total | Flame graph (py-spy) |

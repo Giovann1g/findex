@@ -16,7 +16,9 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
 
+from findex.modes import Semantic
 from findex.rank import ScorerName
+from findex.semantic import Mode
 from findex.web.deps import HolderDep, IndexDep, SettingsDep
 from findex.web.models import (
     DocumentResponse,
@@ -48,6 +50,7 @@ def to_response(page: SearchPage) -> SearchResponse:
     """The internal dataclasses → the public schema (the one seam)."""
     return SearchResponse(
         query=page.query,
+        mode=page.mode,
         scorer=page.scorer,
         page=page.page,
         k=page.k,
@@ -69,10 +72,20 @@ def to_response(page: SearchPage) -> SearchResponse:
 
 
 def search_page(
-    index: IndexDep, settings: SettingsDep, q: str, k: int, page: int, scorer: ScorerName
+    index: IndexDep,
+    settings: SettingsDep,
+    q: str,
+    k: int,
+    page: int,
+    scorer: ScorerName,
+    mode: Mode = "lexical",
+    semantic: Semantic | None = None,
 ) -> SearchResponse:
     try:
-        result = run_search(index, q, k=k, page=page, scorer=scorer, root=settings.corpus_root)
+        result = run_search(
+            index, q, k=k, page=page, scorer=scorer, mode=mode, semantic=semantic,
+            root=settings.corpus_root,
+        )  # fmt: skip
     except BadQuery as exc:
         raise HTTPException(400, str(exc)) from None
     return to_response(result)
@@ -82,13 +95,20 @@ def search_page(
 def api_search(
     index: IndexDep,
     settings: SettingsDep,
+    holder: HolderDep,
     q: Q,
     k: K = 10,
     page: PageNo = 1,
     scorer: ScorerName = "bm25",
+    mode: Mode = "lexical",
 ) -> SearchResponse:
-    """Ranked search, one page of results with highlighted snippets."""
-    return search_page(index, settings, q, k, page, scorer)
+    """Ranked search, one page of results with highlighted snippets.
+
+    ``mode=lexical`` — Boolean query + BM25/TF-IDF; ``semantic`` — embeddings,
+    the best chunk of each page; ``hybrid`` — both, fused with RRF.
+    """
+    semantic = holder.semantic if holder else None
+    return search_page(index, settings, q, k, page, scorer, mode, semantic)
 
 
 @router.get(
@@ -113,6 +133,7 @@ def api_document(
 def api_stats(index: IndexDep, holder: HolderDep, settings: SettingsDep) -> StatsResponse:
     """Index size and how long this process has been up."""
     path = settings.index_path
+    sem = holder.semantic if holder else None
     loaded = holder.loaded_at if holder and holder.loaded_at else datetime.now(UTC)
     started = holder.started if holder else time.monotonic()
     return StatsResponse(
@@ -124,6 +145,8 @@ def api_stats(index: IndexDep, holder: HolderDep, settings: SettingsDep) -> Stat
         layout=index.layout,
         index_path=str(path),
         index_bytes=path.stat().st_size if path.is_file() else 0,
+        semantic_chunks=len(sem.embeddings.vectors) if sem else None,
+        semantic_model=sem.embeddings.model if sem else None,
         loaded_at=loaded,
         uptime_s=round(time.monotonic() - started, 1),
     )
@@ -146,4 +169,6 @@ async def api_health(holder: HolderDep) -> HealthResponse | JSONResponse:
         status = "failed" if holder is not None and holder.error else "loading"
         body = HealthResponse(status=status, detail=holder.error if holder else None)
         return JSONResponse(body.model_dump(exclude_none=True), status_code=503)
-    return HealthResponse(status="ok", documents=holder.index.num_docs)
+    return HealthResponse(
+        status="ok", documents=holder.index.num_docs, semantic=holder.semantic is not None
+    )

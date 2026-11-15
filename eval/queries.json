@@ -12,7 +12,8 @@
         "python-docs/library/asyncio-platforms.rst",
         "python-docs/library/asyncio.rst"
       ],
-      "why": "the event-loop reference, the conceptual overview, runners (which own the loop), the low-level API index, developing-with-asyncio, platform support of loops, the package overview"
+      "why": "the event-loop reference, the conceptual overview, runners (which own the loop), the low-level API index, developing-with-asyncio, platform support of loops, the package overview",
+      "kind": "original"
     },
     {
       "query": "\"context manager\"",
@@ -22,7 +23,8 @@
         "python-docs/reference/datamodel.rst",
         "python-docs/builtins/stdtypes.rst"
       ],
-      "why": "contextlib; the with statement; __enter__/__exit__ in the data model; 'Context Manager Types'"
+      "why": "contextlib; the with statement; __enter__/__exit__ in the data model; 'Context Manager Types'",
+      "kind": "original"
     },
     {
       "query": "generator yield",
@@ -32,7 +34,8 @@
         "python-docs/howto/functional.rst",
         "python-docs/tutorial/classes.rst"
       ],
-      "why": "yield expressions; the yield statement; the Generators section of the functional HOWTO; the tutorial's Generators section"
+      "why": "yield expressions; the yield statement; the Generators section of the functional HOWTO; the tutorial's Generators section",
+      "kind": "original"
     },
     {
       "query": "unicode normalization",
@@ -41,7 +44,8 @@
         "python-docs/library/unicodedata.rst",
         "python-docs/reference/lexical_analysis.rst"
       ],
-      "why": "the Unicode HOWTO; unicodedata.normalize; NFKC normalization of identifiers"
+      "why": "the Unicode HOWTO; unicodedata.normalize; NFKC normalization of identifiers",
+      "kind": "original"
     },
     {
       "query": "lru_cache",
@@ -49,7 +53,8 @@
         "python-docs/library/functools.rst",
         "python-docs/faq/programming.rst"
       ],
-      "why": "the reference; the FAQ 'How do I cache method calls?'"
+      "why": "the reference; the FAQ 'How do I cache method calls?'",
+      "kind": "original"
     },
     {
       "query": "pickle untrusted data",
@@ -59,7 +64,8 @@
         "python-docs/library/marshal.rst",
         "python-docs/library/security_warnings.rst"
       ],
-      "why": "pickle and its security warning; shelve and marshal, which carry the same warning; the security-considerations page"
+      "why": "pickle and its security warning; shelve and marshal, which carry the same warning; the security-considerations page",
+      "kind": "original"
     },
     {
       "query": "\"global interpreter lock\"",
@@ -70,7 +76,8 @@
         "python-docs/c-api/init.rst",
         "python-docs/builtins/threadsafety.rst"
       ],
-      "why": "FAQ 'Can't we get rid of the GIL?'; free threading; threading and the GIL; 'Thread State and the GIL' in the C API; thread safety of built-ins"
+      "why": "FAQ 'Can't we get rid of the GIL?'; free threading; threading and the GIL; 'Thread State and the GIL' in the C API; thread safety of built-ins",
+      "kind": "original"
     },
     {
       "query": "regular expression named groups",
@@ -78,7 +85,8 @@
         "python-docs/library/re.rst",
         "python-docs/howto/regex.rst"
       ],
-      "why": "the re reference and the regex HOWTO"
+      "why": "the re reference and the regex HOWTO",
+      "kind": "original"
     },
     {
       "query": "sort key function",
@@ -88,7 +96,8 @@
         "python-docs/builtins/stdtypes.rst",
         "python-docs/tutorial/datastructures.rst"
       ],
-      "why": "the Sorting HOWTO; sorted(); list.sort(); the tutorial's list methods"
+      "why": "the Sorting HOWTO; sorted(); list.sort(); the tutorial's list methods",
+      "kind": "original"
     },
     {
       "query": "virtual environment",
@@ -97,7 +106,72 @@
         "python-docs/tutorial/venv.rst",
         "python-docs/installing/index.rst"
       ],
-      "why": "the venv reference; the tutorial chapter; Installing Python Modules"
+      "why": "the venv reference; the tutorial chapter; Installing Python Modules",
+      "kind": "original"
+    },
+    {
+      "query": "pick something by chance",
+      "relevant": [
+        "python-docs/library/random.rst",
+        "python-docs/library/secrets.rst"
+      ],
+      "why": "random numbers and choices; secrets (cryptographically strong choices). The pages say 'random', 'choice', 'sample' — never 'by chance'.",
+      "kind": "paraphrase"
+    },
+    {
+      "query": "shrink data so it takes up fewer bytes",
+      "relevant": [
+        "python-docs/library/zlib.rst",
+        "python-docs/library/gzip.rst",
+        "python-docs/library/bz2.rst",
+        "python-docs/library/lzma.rst",
+        "python-docs/library/compression.zstd.rst",
+        "python-docs/library/compression.rst",
+        "python-docs/library/archiving.rst",
+        "python-docs/library/zipfile.rst",
+        "python-docs/library/tarfile.rst"
+      ],
+      "why": "the compression modules and the 'Data Compression and Archiving' index; they say 'compress', never 'shrink'.",
+      "kind": "paraphrase"
+    },
+    {
+      "query": "keep my objects on disk between program launches",
+      "relevant": [
+        "python-docs/library/pickle.rst",
+        "python-docs/library/shelve.rst",
+        "python-docs/library/persistence.rst",
+        "python-docs/library/dbm.rst",
+        "python-docs/library/marshal.rst",
+        "python-docs/library/sqlite3.rst"
+      ],
+      "why": "data persistence: pickle, shelve, dbm, marshal, sqlite3 and the 'Data Persistence' index; they say 'serialize', 'persistent', 'store'.",
+      "kind": "paraphrase"
+    },
+    {
+      "query": "how slow is my function",
+      "relevant": [
+        "python-docs/library/timeit.rst",
+        "python-docs/library/profile.rst",
+        "python-docs/howto/perf_profiling.rst",
+        "python-docs/library/time.rst"
+      ],
+      "why": "timing and profiling code: timeit, the profilers, perf profiling, time.perf_counter; they say 'execution time', 'profile', 'measure'.",
+      "kind": "paraphrase"
+    },
+    {
+      "query": "do several jobs at once on every core",
+      "relevant": [
+        "python-docs/library/multiprocessing.rst",
+        "python-docs/library/concurrent.futures.rst",
+        "python-docs/library/concurrent.rst",
+        "python-docs/library/concurrency.rst",
+        "python-docs/library/concurrent.interpreters.rst",
+        "python-docs/library/multiprocessing.shared_memory.rst",
+        "python-docs/howto/free-threading-python.rst"
+      ],
+      "why": "parallel execution: multiprocessing, concurrent.futures, interpreters, the concurrency index, free-threading; they say 'parallel', 'processes', 'concurrently' — not 'jobs at once'.",
+      "kind": "paraphrase"
     }
-  ]
+  ],
+  "paraphrase_criterion": "Lab 8: five queries that describe a topic in other words than the relevant pages use (their distinctive words — random, compress, pickle/persist, timeit/profile, parallel/process — are deliberately avoided). Labels were written before any run, by topic, like the original ten."
 }

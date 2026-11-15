@@ -7,10 +7,12 @@
 #
 # Three stages: `deps` installs the locked dependencies and findex itself into
 # /app/.venv with uv; `corpus` fetches the CPython documentation sources (the
-# same pinned commit as in the README) and builds the index with findex; the
-# final image copies only the venv, the corpus and the index onto a slim
-# Python base and runs as an unprivileged user. Config comes from the
-# environment only (INDEX_PATH, CORPUS_ROOT, PORT, LOG_LEVEL, LOG_FORMAT).
+# same pinned commit as in the README), builds the index (numpy layout), then
+# downloads the embedding model (pinned revision, SHA-256 checked) and embeds
+# every chunk of every page — a few minutes on CPU; the final image copies the
+# venv, corpus, index, embeddings and model onto a slim Python base and runs
+# as an unprivileged user. Config comes from the environment only (INDEX_PATH,
+# CORPUS_ROOT, EMBEDDINGS_PATH, MODEL_DIR, PORT, LOG_LEVEL, LOG_FORMAT).
 
 ARG PYTHON_IMAGE=python:3.13-slim
 
@@ -48,6 +50,9 @@ COPY --from=deps /app/.venv /app/.venv
 WORKDIR /app
 RUN mkdir -p /app/index \
  && /app/.venv/bin/findex index data -o /app/index/index.pkl --positions --executor serial
+RUN /app/.venv/bin/python -m findex.semantic download /app/models/all-MiniLM-L6-v2 \
+ && /app/.venv/bin/findex embed /app/index/index.pkl -o /app/index/embeddings.npy \
+      --model /app/models/all-MiniLM-L6-v2
 
 # ------------------------------------------------------------- 3. runtime
 FROM ${PYTHON_IMAGE} AS runtime
@@ -57,10 +62,13 @@ WORKDIR /app
 COPY --from=deps /app/.venv /app/.venv
 COPY --from=corpus /app/data /app/data
 COPY --from=corpus /app/index /app/index
+COPY --from=corpus /app/models /app/models
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     INDEX_PATH=/app/index/index.pkl \
     CORPUS_ROOT=/app/data \
+    EMBEDDINGS_PATH=/app/index/embeddings.npy \
+    MODEL_DIR=/app/models/all-MiniLM-L6-v2 \
     HOST=0.0.0.0 \
     PORT=8000 \
     LOG_FORMAT=json

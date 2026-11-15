@@ -7,18 +7,26 @@
   <p class="lead">
     {% if index %}{{ "{:,}".format(index.num_docs).replace(",", " ") }} сторінок,
     {{ "{:,}".format(index|length).replace(",", " ") }} слів в індексі.{% endif %}
-    Фрази в лапках, <code>AND</code> / <code>OR</code> / <code>NOT</code> і дужки.
+    Фрази в лапках, <code>AND</code> / <code>OR</code> / <code>NOT</code> і дужки{% if semantic %};
+    режим «Зміст» шукає за змістом, навіть коли слова інші{% endif %}.
   </p>
   {% endif %}
   <form action="/" method="get" role="search"
         hx-get="/" hx-target="#results" hx-push-url="true"
-        hx-trigger="submit, input changed delay:300ms from:#q, change from:#scorer"
+        hx-trigger="submit, input changed delay:300ms from:#q, change from:#scorer, change from:#mode"
         hx-indicator="#results">
     <div class="box">
       <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="13" cy="13" r="8"/><path d="M19 19l8 8"/></svg>
       <input id="q" name="q" type="search" value="{{ q }}" placeholder='наприклад: "event loop" AND cancel'
              autocomplete="off" spellcheck="false" maxlength="500" {% if not q %}autofocus{% endif %}
              aria-label="Пошуковий запит">
+      {% if semantic %}
+      <select id="mode" name="mode" aria-label="Режим пошуку" title="Слова — BM25 і булеві оператори; Зміст — ембединги; Гібрид — обидва, злиті через RRF">
+        <option value="hybrid" {% if mode == "hybrid" %}selected{% endif %}>Гібрид</option>
+        <option value="lexical" {% if mode == "lexical" %}selected{% endif %}>Слова</option>
+        <option value="semantic" {% if mode == "semantic" %}selected{% endif %}>Зміст</option>
+      </select>
+      {% endif %}
       <select id="scorer" name="scorer" aria-label="Ранжування">
         <option value="bm25" {% if scorer == "bm25" %}selected{% endif %}>BM25</option>
         <option value="tfidf" {% if scorer == "tfidf" %}selected{% endif %}>TF-IDF</option>

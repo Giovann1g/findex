@@ -47,10 +47,14 @@ from findex.crawler.fetch import USER_AGENT
 from findex.crawler.run import crawl_to_jsonl
 from findex.index import Layout, build_index, fmt_bytes
 from findex.merge import ENGINES, EngineName
+from findex.modes import Semantic, snippet
+from findex.modes import run as run_mode
+from findex.npindex import to_numpy
 from findex.parallel import ExecutorName, build_parallel
 from findex.query import PhraseNeedsPositions, QuerySyntaxError, parse
 from findex.rank import ScorerName, make_scorer, search
-from findex.snippets import Part, document_text, snippet_parts
+from findex.semantic import MODEL_NAME, Mode, Ranked
+from findex.snippets import Part
 from findex.store import Format, IndexFileError, detect_format, open_index, save
 
 log = logging.getLogger(__name__)
@@ -124,7 +128,9 @@ def index_cmd(
     limit: Annotated[
         int | None, typer.Option("--limit", min=1, help="Only the first N documents.")
     ] = None,
-    layout: Annotated[Layout, typer.Option(help="Postings layout in memory.")] = "slots",
+    layout: Annotated[
+        Layout, typer.Option(help="Postings layout in memory (numpy: int32 arrays, Lab 8).")
+    ] = "numpy",
     fmt: Annotated[
         Format | None, typer.Option("--format", help="File format (default: from suffix).")
     ] = None,
@@ -182,6 +188,8 @@ def index_cmd(
                 on_done=lambda part: progress.advance(task, part.num_docs),
             )
             del stats  # parallel.build_parallel already logs partial/merge times at INFO
+            if layout == "numpy":  # merged as Posting objects; pack into int32 arrays
+                ix = to_numpy(ix)
         else:
 
             def tracked(stream: Iterable[Document]) -> Iterator[Document]:
@@ -235,7 +243,18 @@ def search_cmd(
     scorer: Annotated[ScorerName, typer.Option(help="Ranking function.")] = "bm25",
     k1: Annotated[float, typer.Option(help="BM25 tf saturation.")] = 1.5,
     b: Annotated[float, typer.Option(help="BM25 length normalization, 0..1.")] = 0.75,
-    engine: Annotated[EngineName, typer.Option(help="Boolean set operations.")] = "merge",
+    engine: Annotated[
+        EngineName, typer.Option(help="Boolean set operations (slots/array layouts).")
+    ] = "merge",
+    mode: Annotated[
+        Mode, typer.Option(help="lexical (BM25), semantic (embeddings) or hybrid (RRF).")
+    ] = "lexical",
+    embeddings: Annotated[Path, typer.Option(help="From `findex embed` (semantic/hybrid).")] = Path(
+        "data/embeddings.npy"
+    ),
+    model: Annotated[Path, typer.Option(help="Model directory (semantic/hybrid).")] = Path(
+        "models/all-MiniLM-L6-v2"
+    ),
     json_out: Annotated[
         bool, typer.Option("--json", help="JSON lines on stdout instead of a table.")
     ] = False,
@@ -260,18 +279,32 @@ def search_cmd(
     except ValueError as exc:
         fail(str(exc))
 
+    semantic: Semantic | None = None
+    if mode != "lexical":
+        from findex.semantic import Embeddings, OnnxEmbedder
+
+        try:
+            semantic = Semantic(Embeddings.load(embeddings), OnnxEmbedder(model))
+        except (FileNotFoundError, ValueError) as exc:
+            fail(f"{exc} (build them with `findex embed INDEX`)")
+
     rows: list[Hit] = []
     try:
         with open_index(index_path, fmt, lazy=lazy) as ix:
-            results = search(ix, node, scorer=ranker, k=k, engine=ENGINES[engine])
-            total = len(ix.match(node, ENGINES[engine]))
-            terms = node.terms()
-            for rank, r in enumerate(results, start=1):
-                text = document_text(ix, r.doc_id, root) if snippets else None
-                parts = snippet_parts(text, terms) if text is not None else []
+            if mode == "lexical" and ix.layout != "numpy":  # Lab 3 path, engine selectable
+                results = search(ix, node, scorer=ranker, k=k, engine=ENGINES[engine])
+                ranked = Ranked(results, {})
+                total, terms = len(ix.match(node, ENGINES[engine])), node.terms()
+            else:
+                if semantic is not None:
+                    semantic.check(ix)
+                outcome = run_mode(ix, query, mode=mode, scorer=scorer, k=k, semantic=semantic)
+                ranked, total, terms = outcome.ranked, outcome.total, outcome.terms
+            for rank, r in enumerate(ranked.results, start=1):
+                parts = snippet(ix, r.doc_id, terms, ranked, root, tidy=False) if snippets else []
                 path = ix.doc_meta[r.doc_id].path
                 rows.append(Hit(rank, r.doc_id, r.score, r.title, path, parts))
-    except (FileNotFoundError, IndexFileError, PhraseNeedsPositions) as exc:
+    except (FileNotFoundError, IndexFileError, PhraseNeedsPositions, ValueError) as exc:
         fail(str(exc))
 
     if json_out:
@@ -282,7 +315,8 @@ def search_cmd(
         stderr.print("no documents match", soft_wrap=True)
         return
     table = Table(
-        title=f"{total:,} matching documents · top {len(rows)} by {ranker!r}",
+        title=f"{total:,} matching documents · top {len(rows)} · "
+        + (f"{ranker!r}" if mode == "lexical" else f"{mode} ({MODEL_NAME})"),
         show_lines=True,
         expand=True,
     )
@@ -537,4 +571,51 @@ def serve_cmd(
         access_log=False,  # findex.web logs one line per request, with its request id
         proxy_headers=True,  # behind the platform's proxy: real client address and scheme
         forwarded_allow_ips="*",
+    )
+
+
+# --------------------------------------------------------------------------- embed
+DEFAULT_MODEL_DIR = Path("models/all-MiniLM-L6-v2")
+
+
+@app.command("embed")
+def embed_cmd(
+    index_path: Annotated[Path, typer.Argument(metavar="INDEX", help="File from `findex index`.")],
+    out: Annotated[
+        Path, typer.Option("--out", "-o", help="Embedding matrix (.npy); sidecars go beside it.")
+    ] = Path("data/embeddings.npy"),
+    model: Annotated[
+        Path, typer.Option(help="Directory with model.onnx + tokenizer.json.")
+    ] = DEFAULT_MODEL_DIR,
+    max_words: Annotated[int, typer.Option(min=16, help="Words per chunk.")] = 200,
+    root: Annotated[
+        Path | None, typer.Option(help="Corpus directory, if moved since indexing.")
+    ] = None,
+) -> None:
+    """Chunk every document, embed the chunks (all-MiniLM-L6-v2), save a .npy matrix."""
+    from findex.semantic import OnnxEmbedder, embed_index
+
+    if not out.parent.is_dir():
+        fail(f"output directory does not exist: {out.parent}")
+    try:
+        embedder = OnnxEmbedder(model)
+    except (FileNotFoundError, ValueError) as exc:
+        fail(str(exc))
+    try:
+        with open_index(index_path) as ix, Progress(
+            SpinnerColumn(), TextColumn("embedding chunks"), BarColumn(), MofNCompleteColumn(),
+            TimeElapsedColumn(), console=stderr,
+        ) as progress:  # fmt: skip
+            task = progress.add_task("embed", total=None)
+            emb = embed_index(
+                ix, embedder, root=root, max_words=max_words,
+                on_progress=lambda done, total: progress.update(task, completed=done, total=total),
+            )  # fmt: skip
+    except (FileNotFoundError, IndexFileError) as exc:
+        fail(str(exc))
+    emb.save(out)
+    stderr.print(
+        f"wrote [bold]{out}[/]: {len(emb.vectors):,} chunks × {emb.vectors.shape[1]} "
+        f"({fmt_bytes(out.stat().st_size)}) for {emb.num_docs:,} documents",
+        soft_wrap=True,
     )

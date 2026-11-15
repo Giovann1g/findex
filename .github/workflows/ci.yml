@@ -45,16 +45,57 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build the image
+      - name: Build the image (index, model download, embeddings)
         run: docker build -t findex .
 
       - name: Run it, wait for /health, search, check the user
         run: |
           docker run -d --name findex -p 8000:8000 findex
-          for i in $(seq 1 60); do curl -fsS localhost:8000/health && break; sleep 1; done
+          for i in $(seq 1 90); do curl -fsS localhost:8000/health && break; sleep 1; done
           curl -fsS localhost:8000/health
           curl -fsS "localhost:8000/search?q=asyncio&k=3" | python3 -m json.tool | head -20
+          curl -fsS "localhost:8000/search?q=run+jobs+in+parallel&mode=semantic&k=3" | python3 -m json.tool | head -12
+          curl -fsS localhost:8000/health | grep -q '"semantic":true'
           curl -fsS -o /dev/null localhost:8000/
           test "$(docker inspect --format '{{.Config.User}}' findex)" = findex
           test "$(docker exec findex id -u)" != 0
           docker logs findex | tail -5
+
+  benchmark:
+    # pytest-benchmark: search (Lab 3 vs NumPy) and build_index, compared with the
+    # last run on main; a median 50 % slower than that fails the build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install the project and dev tools
+        run: uv sync --locked
+
+      - name: Previous results from main
+        uses: actions/cache/restore@v4
+        with:
+          path: .benchmarks
+          key: bench-${{ runner.os }}-${{ github.sha }}
+          restore-keys: bench-${{ runner.os }}-
+
+      - name: Run the benchmarks
+        run: |
+          args="--benchmark-enable --benchmark-only --benchmark-autosave --benchmark-columns=min,median,stddev,rounds"
+          if ls .benchmarks/*/*.json > /dev/null 2>&1; then
+            args="$args --benchmark-compare --benchmark-compare-fail=median:50%"
+          fi
+          uv run pytest tests/test_benchmarks.py -p no:cacheprovider $args | tee bench.txt
+          uv run pytest tests/test_benchmarks.py -k beats_lab3 -q
+          { echo '```'; sed -n '/benchmark/,/Legend/p' bench.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save results (main only)
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: .benchmarks
+          key: bench-${{ runner.os }}-${{ github.sha }}

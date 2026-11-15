@@ -1,6 +1,6 @@
 [project]
 name = "findex"
-version = "0.7.0"
+version = "1.0.0"
 description = "A full-text search engine over your own corpus: streaming indexer, BM25 ranking, Boolean/phrase queries, CLI."
 readme = "README.md"
 authors = [{ name = "Oleksandr Kukharskyi" }]
@@ -63,7 +63,7 @@ typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers --benchmark-disable"
 markers = ["slow: takes more than a second; skip with -m 'not slow'"]
 filterwarnings = [
     # Starlette's TestClient now prefers the httpx2 fork; httpx (what findex uses) still works
@@ -86,6 +86,8 @@ omit = [
     "*/findex/crawler/bench.py",
     "*/findex/crawler/inline_demo.py",
     "*/findex/web/bench.py",
+    "*/findex/bench_numpy.py",
+    "*/findex/profiling.py",
     "*/findex/__main__.py",
 ]
 

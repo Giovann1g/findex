@@ -1,0 +1,64 @@
+{
+  "rows": [
+    {
+      "query": "frequent term `the` (df 552)",
+      "scorer": "BM25",
+      "matched": 552,
+      "lab3_ms": 0.42070411999986845,
+      "numpy_ms": 0.05130794499990543,
+      "speedup": 8.199590141461403
+    },
+    {
+      "query": "frequent term `the` (df 552)",
+      "scorer": "TF-IDF",
+      "matched": 552,
+      "lab3_ms": 0.2576837899999873,
+      "numpy_ms": 0.04240071499992837,
+      "speedup": 6.077345393831746
+    },
+    {
+      "query": "rare term `abandon` (df 2)",
+      "scorer": "BM25",
+      "matched": 2,
+      "lab3_ms": 0.01153730499993344,
+      "numpy_ms": 0.019971940000118593,
+      "speedup": 0.5776757290410912
+    },
+    {
+      "query": "rare term `abandon` (df 2)",
+      "scorer": "TF-IDF",
+      "matched": 2,
+      "lab3_ms": 0.01062631999985797,
+      "numpy_ms": 0.017061355000009826,
+      "speedup": 0.6228297810960413
+    },
+    {
+      "query": "three terms `asyncio event loop`",
+      "scorer": "BM25",
+      "matched": 45,
+      "lab3_ms": 0.12603216999991673,
+      "numpy_ms": 0.07464171500004113,
+      "speedup": 1.6884950995545491
+    },
+    {
+      "query": "three terms `asyncio event loop`",
+      "scorer": "TF-IDF",
+      "matched": 45,
+      "lab3_ms": 0.08482180500010372,
+      "numpy_ms": 0.05749992999994902,
+      "speedup": 1.4751636219414341
+    }
+  ],
+  "load": {
+    "slots": {
+      "load_s": 1.0115619520000223,
+      "rss_mib": 179.58984375,
+      "bytes": 11555980
+    },
+    "numpy": {
+      "load_s": 0.07407162700002345,
+      "rss_mib": 33.26953125,
+      "bytes": 12231460
+    }
+  }
+}
